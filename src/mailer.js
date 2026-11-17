@@ -29,7 +29,7 @@ function address(name, email) {
 
 const b64Lines = (str) => Buffer.from(str, 'utf8').toString('base64').replace(/.{76}/g, '$&\r\n');
 
-export function buildMessage({ from, to, replyTo, subject, html, text, headers = {}, domain }) {
+export function buildMessage({ from, to, replyTo, subject, html, text, headers = {}, domain, attachments = [] }) {
   const boundary = 'nm_' + crypto.randomBytes(12).toString('hex');
   const msgId = `<${crypto.randomBytes(16).toString('hex')}@${domain || 'localhost'}>`;
   const lines = [
@@ -40,10 +40,25 @@ export function buildMessage({ from, to, replyTo, subject, html, text, headers =
   if (replyTo) lines.push(`Reply-To: <${cleanAddr(replyTo)}>`);
   lines.push(`Subject: ${encodeWord(cleanHeader(subject))}`, `Message-ID: ${msgId}`);
   for (const [k, v] of Object.entries(headers)) if (v) lines.push(`${k}: ${cleanHeader(v)}`);
-  lines.push('MIME-Version: 1.0', `Content-Type: multipart/alternative; boundary="${boundary}"`, '',
+  const body = [
     `--${boundary}`, 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '', b64Lines(text || ''),
     `--${boundary}`, 'Content-Type: text/html; charset=utf-8', 'Content-Transfer-Encoding: base64', '', b64Lines(html || ''),
-    `--${boundary}--`, '');
+    `--${boundary}--`];
+  if (!attachments.length) {
+    lines.push('MIME-Version: 1.0', `Content-Type: multipart/alternative; boundary="${boundary}"`, '', ...body, '');
+    return lines.join('\r\n');
+  }
+  // עם קבצים מצורפים: מעטפת mixed, ובתוכה גוף ההודעה ואחריו הקבצים. b64 מחושב מראש פעם אחת לכל גליון
+  const outer = 'nmx_' + crypto.randomBytes(12).toString('hex');
+  lines.push('MIME-Version: 1.0', `Content-Type: multipart/mixed; boundary="${outer}"`, '',
+    `--${outer}`, `Content-Type: multipart/alternative; boundary="${boundary}"`, '', ...body);
+  for (const a of attachments) {
+    const ascii = cleanHeader(a.name).replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '');
+    const star = "UTF-8''" + encodeURIComponent(cleanHeader(a.name));
+    lines.push(`--${outer}`, `Content-Type: ${cleanHeader(a.type) || 'application/octet-stream'}; name="${ascii}"`,
+      `Content-Disposition: attachment; filename="${ascii}"; filename*=${star}`, 'Content-Transfer-Encoding: base64', '', a.b64);
+  }
+  lines.push(`--${outer}--`, '');
   return lines.join('\r\n');
 }
 

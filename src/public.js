@@ -198,6 +198,23 @@ export function registerPublic(router, { db }) {
     html(res, prefsPage(params.token, { ...sub, name: String(f.get('name') || '').slice(0, 120) }, 'השינויים נשמרו.'));
   }, { anyBody: true });
 
+  // ---------- סקר בתוך גליון ----------
+  router.add('GET', '/poll/:token/:pid/:answer', ({ res, params }) => {
+    const ids = readToken(secret(), params.token);
+    const answer = Number(params.answer);
+    const c = ids && db.get('SELECT design FROM campaigns WHERE id=?', ids.campaignId);
+    let block = null;
+    try { block = (JSON.parse(c?.design || '{}').blocks || []).find((b) => b && b.type === 'poll' && b.pid === params.pid); } catch { block = null; }
+    const option = block && Number.isInteger(answer) ? (block.options || [])[answer] : undefined;
+    if (!option) return html(res, page('סקר', '<h1>הקישור לא תקין</h1>'), 400);
+    // נמען 0 הוא צפייה מהארכיון הציבורי: מציגים תודה בלי לרשום הצבעה
+    if (ids.subscriberId > 0) {
+      db.run(`INSERT INTO poll_votes(campaign_id, poll, subscriber_id, answer, created_at) VALUES(?,?,?,?,?)
+        ON CONFLICT(campaign_id, poll, subscriber_id) DO UPDATE SET answer=excluded.answer, created_at=excluded.created_at`, ids.campaignId, params.pid, ids.subscriberId, answer, now());
+    }
+    html(res, page('תודה', `<h1>תודה, תשובתך נרשמה</h1><p>${esc(block.question)}</p><p><b>${esc(option)}</b></p><p>אפשר לשנות את התשובה בלחיצה על אפשרות אחרת במייל.</p>`));
+  });
+
   // ---------- ארכיון ציבורי ----------
   router.add('GET', '/archive', ({ res }) => {
     if (db.setting('archiveEnabled') !== '1') return html(res, page('ארכיון', '<h1>הדף לא נמצא</h1>'), 404);

@@ -78,6 +78,7 @@ export const DEFAULT_SETTINGS = {
   formColor: '#1b4fd8',
   formLogo: '',
   formAskName: '1',
+  customFields: '',
   formDoubleOptIn: '0',
   confirmSubject: 'נא לאשר את ההרשמה לרשימת התפוצה',
   confirmText: 'קיבלנו בקשה לצרף את הכתובת הזו לרשימת התפוצה שלנו. כדי להשלים את ההרשמה יש ללחוץ על הכפתור. אם לא ביקשת להירשם, אפשר להתעלם מהמייל הזה.',
@@ -96,6 +97,21 @@ export function openDb(dataDir) {
   raw.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;');
   raw.exec(SCHEMA);
   // שדרוג מגרסאות קודמות: עמודות המשתמשים שנוספו ב-0.3.0. משתמשים קיימים נשארים מנהלים.
+  // 0.6.0: שדות מותאמים, קבצים מצורפים, בדיקת A/B, אוטומציות וסקרים
+  const hasCol = (t, c) => raw.prepare(`PRAGMA table_info(${t})`).all().some((x) => x.name === c);
+  if (!hasCol('subscribers', 'fields')) raw.exec("ALTER TABLE subscribers ADD COLUMN fields TEXT NOT NULL DEFAULT '{}'");
+  if (!hasCol('campaigns', 'auto')) {
+    raw.exec(`ALTER TABLE campaigns ADD COLUMN auto INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE campaigns ADD COLUMN subject_b TEXT NOT NULL DEFAULT '';
+      ALTER TABLE campaigns ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';`);
+  }
+  if (!hasCol('deliveries', 'variant')) raw.exec("ALTER TABLE deliveries ADD COLUMN variant TEXT NOT NULL DEFAULT ''");
+  raw.exec(`CREATE TABLE IF NOT EXISTS automations(
+      id INTEGER PRIMARY KEY, name TEXT NOT NULL, list_id INTEGER NOT NULL, campaign_id INTEGER NOT NULL,
+      delay_hours INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS poll_votes(
+      campaign_id INTEGER NOT NULL, poll TEXT NOT NULL, subscriber_id INTEGER NOT NULL, answer INTEGER NOT NULL, created_at INTEGER NOT NULL,
+      PRIMARY KEY(campaign_id, poll, subscriber_id)) WITHOUT ROWID;`);
   // 0.4.0: גליון שמוצג בארכיון הציבורי
   if (!raw.prepare('PRAGMA table_info(campaigns)').all().some((c) => c.name === 'public')) {
     raw.exec('ALTER TABLE campaigns ADD COLUMN public INTEGER NOT NULL DEFAULT 0');

@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { now } from './db.js';
 import { buildMessage, SmtpConnection, smtpOptions } from './mailer.js';
 import { makeToken, prepareCampaign, personalize, addPixel } from './track.js';
@@ -17,19 +19,58 @@ export function enqueueCampaign(db, campaignId) {
     JOIN subscribers s ON s.id = sp.subscriber_id
     WHERE sp.list_id IN (SELECT list_id FROM campaign_lists WHERE campaign_id = ?) AND s.status = 'active'`,
   campaignId, campaignId);
+  // בדיקת A/B: חצי מהנמענים מקבלים את הנושא החלופי. החלוקה לפי מזהה הנמען, כך שהיא יציבה גם בשליחה חוזרת
+  if (String(c.subject_b || '').trim()) {
+    db.run("UPDATE deliveries SET variant = CASE WHEN subscriber_id % 2 = 0 THEN 'a' ELSE 'b' END WHERE campaign_id=? AND variant=''", campaignId);
+  }
   db.run("UPDATE campaigns SET status='sending', started_at=COALESCE(started_at, ?), finished_at=NULL, scheduled_at=NULL, updated_at=? WHERE id=?",
     now(), now(), campaignId);
   return Number(r.changes);
 }
 
-export function buildFor(db, settings, campaign, subscriber) {
+const attCache = new Map();
+/** קובצי הגליון מקודדים ל-base64 פעם אחת, ונשמרים בזיכרון כל עוד רשימת הקבצים לא השתנתה. */
+export function campaignAttachments(db, campaign) {
+  const key = String(campaign.attachments || '[]');
+  if (key === '[]') return [];
+  const hit = attCache.get(campaign.id);
+  if (hit && hit.key === key) return hit.list;
+  let meta = [];
+  try { meta = JSON.parse(key); } catch { meta = []; }
+  const list = [];
+  for (const a of meta) {
+    try {
+      const buf = fs.readFileSync(path.join(db.dataDir, 'attachments', String(campaign.id), a.id));
+      list.push({ name: a.name, type: a.type, b64: buf.toString('base64').replace(/.{76}/g, '$&\r\n') });
+    } catch { /* קובץ שנמחק מהדיסק: שולחים בלעדיו */ }
+  }
+  if (attCache.size > 20) attCache.clear();
+  attCache.set(campaign.id, { key, list });
+  return list;
+}
+
+/** מוסיף לתור של כל אוטומציה פעילה את מי שהצטרף לרשימה אחריה, כשהגיע זמנו. */
+export function runAutomations(db) {
+  let added = 0;
+  for (const a of db.all('SELECT * FROM automations WHERE active=1')) {
+    added += Number(db.run(`INSERT OR IGNORE INTO deliveries(campaign_id, subscriber_id)
+      SELECT ?, s.id FROM subscriptions sp JOIN subscribers s ON s.id=sp.subscriber_id
+      WHERE sp.list_id=? AND s.status='active' AND sp.created_at >= ? AND sp.created_at <= ?`,
+    a.campaign_id, a.list_id, a.created_at, now() - a.delay_hours * 3600).changes);
+  }
+  return added;
+}
+
+export function buildFor(db, settings, campaign, subscriber, variant = '') {
   const baseUrl = settings.baseUrl.replace(/\/+$/, '');
   const token = makeToken(settings.secret, campaign.id, subscriber.id);
   const fromEmail = campaign.from_email || settings.fromEmail;
-  const ctx = { baseUrl, token, subscriber };
+  const lists = String(campaign.prepared_html || '').includes('nm-if:')
+    ? db.all('SELECT list_id FROM subscriptions WHERE subscriber_id=?', subscriber.id).map((r) => r.list_id) : [];
+  const ctx = { baseUrl, token, subscriber, lists };
   const html = addPixel(personalize(campaign.prepared_html, { ...ctx, isHtml: true }), baseUrl, token);
   const text = personalize(campaign.prepared_text, { ...ctx, isHtml: false });
-  const subject = personalize(campaign.subject, { ...ctx, isHtml: false });
+  const subject = personalize(variant === 'b' && campaign.subject_b ? campaign.subject_b : campaign.subject, { ...ctx, isHtml: false });
   const bounce = settings.bounceAddress || fromEmail;
   const envelopeFrom = settings.bounceAddress ? bounce.replace('@', `+${token}@`) : bounce;
   const raw = buildMessage({
@@ -37,6 +78,7 @@ export function buildFor(db, settings, campaign, subscriber) {
     to: { name: subscriber.name, email: subscriber.email },
     replyTo: campaign.reply_to || settings.replyTo,
     subject, html, text,
+    attachments: campaignAttachments(db, campaign),
     domain: domainOf(fromEmail),
     headers: {
       'List-Unsubscribe': `<${baseUrl}/u/${token}>`,
@@ -76,6 +118,7 @@ export class Worker {
       const n = enqueueCampaign(db, c.id);
       this.log.info(`[worker] גליון ${c.id} התחיל, ${n} נמענים`);
     }
+    runAutomations(db);
     const settings = db.settings();
     const rate = Math.max(0.1, Number(settings.sendPerSecond) || 5);
     const dailyLimit = Number(settings.dailyLimit) || 0;
@@ -86,13 +129,13 @@ export class Worker {
       if (dailyLimit > 0) budget = Math.min(budget, dailyLimit - sentToday(db));
       if (budget <= 0) return handled;
 
-      const batch = db.all(`SELECT d.subscriber_id, d.tries, s.email, s.name, s.status FROM deliveries d
+      const batch = db.all(`SELECT d.subscriber_id, d.tries, d.variant, s.email, s.name, s.status, s.fields FROM deliveries d
         JOIN subscribers s ON s.id = d.subscriber_id
         WHERE d.campaign_id=? AND d.status='pending' AND d.next_try <= ? LIMIT ?`, campaign.id, now(), budget);
 
       if (!batch.length) {
         const left = Number(db.get("SELECT COUNT(*) n FROM deliveries WHERE campaign_id=? AND status='pending'", campaign.id).n);
-        if (!left) {
+        if (!left && !campaign.auto) {
           db.run("UPDATE campaigns SET status='sent', finished_at=?, updated_at=? WHERE id=?", now(), now(), campaign.id);
           this.log.info(`[worker] גליון ${campaign.id} הסתיים`);
         }
@@ -109,8 +152,8 @@ export class Worker {
             db.run("UPDATE deliveries SET status='skipped', error='הנמען כבר לא פעיל' WHERE campaign_id=? AND subscriber_id=?", campaign.id, row.subscriber_id);
             continue;
           }
-          const sub = { id: row.subscriber_id, email: row.email, name: row.name };
-          const { raw, envelopeFrom } = buildFor(db, settings, campaign, sub);
+          const sub = { id: row.subscriber_id, email: row.email, name: row.name, fields: row.fields };
+          const { raw, envelopeFrom } = buildFor(db, settings, campaign, sub, row.variant);
           try {
             await conn.send(envelopeFrom, sub.email, raw);
             db.run("UPDATE deliveries SET status='sent', sent_at=?, error=NULL WHERE campaign_id=? AND subscriber_id=?", now(), campaign.id, sub.id);

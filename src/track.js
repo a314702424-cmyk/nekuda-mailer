@@ -53,7 +53,8 @@ export function prepareCampaign(db, c) {
     const footer = DEFAULT_FOOTER(db.setting('companyAddress'));
     html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, footer + '</body>') : html + footer;
   }
-  const text = htmlToText(html);
+  // בגרסת הטקסט שומרים את סימוני התנאים, כדי שבלוק מותנה לא ידלוף למי שלא אמור לראות אותו
+  const text = htmlToText(html.replace(/<!--nm-if:(!?L\d+)-->/g, '[[nm-if:$1]]').replace(/<!--nm-end-->/g, '[[nm-end]]'));
   const tracked = html.replace(/(<a\s[^>]*?href\s*=\s*")(https?:\/\/[^"]+)(")/gi, (m, pre, url, post) => {
     const clean = withUtm(url.replace(/&amp;/g, '&'), utm, baseUrl);
     db.run('INSERT OR IGNORE INTO links(campaign_id, url) VALUES(?,?)', c.id, clean);
@@ -64,8 +65,16 @@ export function prepareCampaign(db, c) {
   return { html: tracked, text };
 }
 
-export function personalize(tpl, { baseUrl, token, subscriber, isHtml }) {
+const COND = /(?:<!--nm-if:(!?)L(\d+)-->|\[\[nm-if:(!?)L(\d+)\]\])([\s\S]*?)(?:<!--nm-end-->|\[\[nm-end\]\])/g;
+
+/**
+ * מתאים תבנית לנמען: תגים, שדות מותאמים, ובלוקים שמוצגים רק לחברי רשימה מסוימת.
+ * lists: מערך מזהי הרשימות של הנמען. בלי lists (תצוגה מקדימה כללית) כל הבלוקים המותנים מוצגים.
+ */
+export function personalize(tpl, { baseUrl, token, subscriber, isHtml, lists }) {
   const first = String(subscriber.name || '').trim().split(/\s+/)[0] || '';
+  let fields = subscriber.fields || {};
+  if (typeof fields === 'string') { try { fields = JSON.parse(fields) || {}; } catch { fields = {}; } }
   const vars = {
     BASE: baseUrl,
     TOKEN: token,
@@ -76,9 +85,17 @@ export function personalize(tpl, { baseUrl, token, subscriber, isHtml }) {
     webview_url: `${baseUrl}/v/${token}`,
     preferences_url: `${baseUrl}/p/${token}`,
   };
-  return String(tpl || '').replace(/\{\{(\w+)\}\}/g, (m, k) => {
-    if (!(k in vars)) return '';
-    return isHtml && (k === 'name' || k === 'first_name' || k === 'email') ? esc(vars[k]) : vars[k];
+  const builtin = new Set(Object.keys(vars));
+  const safe = new Set(['BASE', 'TOKEN', 'unsubscribe_url', 'webview_url', 'preferences_url']);
+  const body = String(tpl || '').replace(COND, (m, n1, l1, n2, l2, inner) => {
+    if (!lists) return inner;
+    const has = lists.includes(Number(l1 || l2));
+    return (n1 || n2 ? !has : has) ? inner : '';
+  });
+  return body.replace(/\{\{(\w+)\}\}/g, (m, k) => {
+    if (builtin.has(k)) return isHtml && !safe.has(k) ? esc(vars[k]) : vars[k];
+    if (Object.hasOwn(fields, k)) return isHtml ? esc(String(fields[k] ?? '')) : String(fields[k] ?? '');
+    return '';
   });
 }
 

@@ -6,11 +6,28 @@ import { now, DEFAULT_SETTINGS } from './db.js';
 import { parseContacts, isEmail, csvCell } from './csv.js';
 import { defaultDesign, letterDesign, newsletterDesign, htmlToText } from '../web/shared/render.js';
 import { checkEmail, extractLinks } from '../web/shared/check.js';
-import { campaignHtml, makeToken, personalize } from './track.js';
-import { enqueueCampaign, sentToday } from './worker.js';
+import { campaignHtml, makeToken, personalize, prepareCampaign } from './track.js';
+import { enqueueCampaign, sentToday, campaignAttachments } from './worker.js';
 import { buildMessage, SmtpConnection, smtpOptions } from './mailer.js';
 import { ALL_PERMS, permFor } from '../web/shared/perms.js';
 import { htmlToPdf, chromePath } from './pdf.js';
+
+const FIELD_KEY = /^[a-z][a-z0-9_]{1,20}$/;
+const RESERVED = ['name', 'first_name', 'email', 'unsubscribe_url', 'webview_url', 'preferences_url', 'base', 'token'];
+/** שדות מותאמים מוגדרים בהגדרות, שורה לכל שדה: מפתח:כותרת */
+export function customFields(db) {
+  const out = [];
+  for (const line of String(db.setting('customFields') || '').split('\n')) {
+    const i = line.indexOf(':');
+    const key = (i < 0 ? line : line.slice(0, i)).trim();
+    if (!FIELD_KEY.test(key) || RESERVED.includes(key) || out.some((f) => f.key === key)) continue;
+    out.push({ key, label: (i < 0 ? key : line.slice(i + 1).trim()) || key });
+  }
+  return out.slice(0, 20);
+}
+const ATTACH_TYPES = { '.pdf': 'application/pdf', '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.txt': 'text/plain',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.ics': 'text/calendar' };
 
 const SESSION_DAYS = 30;
 const COOKIE = 'nm_sess';
@@ -68,7 +85,8 @@ function campaignOut(db, c, full = false) {
     replyTo: c.reply_to, mode: c.mode, status: c.status, scheduledAt: c.scheduled_at, startedAt: c.started_at,
     finishedAt: c.finished_at, createdAt: c.created_at, updatedAt: c.updated_at,
     listIds: db.all('SELECT list_id FROM campaign_lists WHERE campaign_id=?', c.id).map((r) => r.list_id),
-    stats: campaignStats(db, c.id), public: !!c.public,
+    stats: campaignStats(db, c.id), public: !!c.public, auto: !!c.auto, subjectB: c.subject_b || '',
+    attachments: (() => { try { return JSON.parse(c.attachments || '[]'); } catch { return []; } })(),
   };
   if (full) {
     out.html = c.html || '';
@@ -95,7 +113,8 @@ function previewHtml(db, c, subscriber) {
     h += '<div style="padding:16px;font:13px Arial;color:#6b7280;text-align:center" dir="rtl"><a href="{{unsubscribe_url}}" style="color:#6b7280">להסרה מרשימת התפוצה</a></div>';
   }
   const token = makeToken(settings.secret, c.id, subscriber.id);
-  return { html: personalize(h, { baseUrl, token, subscriber, isHtml: true }), token, settings, baseUrl };
+  const lists = subscriber.id ? db.all('SELECT list_id FROM subscriptions WHERE subscriber_id=?', subscriber.id).map((r) => r.list_id) : undefined;
+  return { html: personalize(h, { baseUrl, token, subscriber, isHtml: true, lists }), token, settings, baseUrl };
 }
 
 export function registerApi(router, { db, worker, version }) {
@@ -109,6 +128,7 @@ export function registerApi(router, { db, worker, version }) {
       user: user ? { id: user.id, name: user.username, role: user.role, perms: user.perms } : null,
       google: !!(db.setting('googleClientId') && db.setting('googleClientSecret')),
       pdf: !!chromePath(),
+      fields: user ? customFields(db) : [],
     });
   });
 
@@ -285,10 +305,10 @@ export function registerApi(router, { db, worker, version }) {
     const page = Math.max(1, Number(query.get('page')) || 1);
     const size = 50;
     const total = Number(db.get(`SELECT COUNT(*) n FROM subscribers s ${w}`, ...p).n);
-    const rows = db.all(`SELECT s.id, s.email, s.name, s.status, s.source, s.created_at, s.last_open_at,
+    const rows = db.all(`SELECT s.id, s.email, s.name, s.status, s.source, s.created_at, s.last_open_at, s.fields,
       (SELECT GROUP_CONCAT(list_id) FROM subscriptions sp WHERE sp.subscriber_id=s.id) lists
       FROM subscribers s ${w} ORDER BY s.id DESC LIMIT ? OFFSET ?`, ...p, size, (page - 1) * size)
-      .map((r) => ({ ...r, lists: r.lists ? String(r.lists).split(',').map(Number) : [] }));
+      .map((r) => ({ ...r, fields: (() => { try { return JSON.parse(r.fields || '{}'); } catch { return {}; } })(), lists: r.lists ? String(r.lists).split(',').map(Number) : [] }));
     json(res, { total, page, size, rows });
   });
 
@@ -350,7 +370,14 @@ export function registerApi(router, { db, worker, version }) {
         id = Number(db.run('INSERT INTO subscribers(email, name, status, source, created_at) VALUES(?,?,?,?,?)',
           email, str(body.name, 200), status, 'manual', now()).lastInsertRowid);
       }
-      db.run('DELETE FROM subscriptions WHERE subscriber_id=?', id);
+      if (body.fields && typeof body.fields === 'object') {
+        const clean = {};
+        for (const f of customFields(db)) { const v = str(body.fields[f.key], 300).trim(); if (v) clean[f.key] = v; }
+        db.run('UPDATE subscribers SET fields=? WHERE id=?', JSON.stringify(clean), id);
+      }
+      // שומרים את מועד ההצטרפות של רשימות קיימות, כי אוטומציות נשענות עליו
+      const keep = lists.length ? ` AND list_id NOT IN (${lists.map(() => '?').join(',')})` : '';
+      db.run(`DELETE FROM subscriptions WHERE subscriber_id=?${keep}`, id, ...lists);
       for (const l of lists) db.run('INSERT OR IGNORE INTO subscriptions(subscriber_id, list_id, created_at) VALUES(?,?,?)', id, l, now());
       return id;
     });
@@ -477,8 +504,8 @@ export function registerApi(router, { db, worker, version }) {
     need(!body.fromEmail || isEmail(body.fromEmail), 'כתובת השולח לא תקינה');
     need(!body.replyTo || isEmail(body.replyTo), 'כתובת התשובה לא תקינה');
     db.tx(() => {
-      db.run(`UPDATE campaigns SET subject=?, preheader=?, from_name=?, from_email=?, reply_to=?, mode=?, design=?, html=?, updated_at=? WHERE id=?`,
-        str(body.subject, 300), str(body.preheader, 300), str(body.fromName, 120), str(body.fromEmail, 254).trim(), str(body.replyTo, 254).trim(),
+      db.run(`UPDATE campaigns SET subject=?, subject_b=?, preheader=?, from_name=?, from_email=?, reply_to=?, mode=?, design=?, html=?, updated_at=? WHERE id=?`,
+        str(body.subject, 300), str(body.subjectB, 300).trim(), str(body.preheader, 300), str(body.fromName, 120), str(body.fromEmail, 254).trim(), str(body.replyTo, 254).trim(),
         body.mode === 'html' ? 'html' : 'blocks', JSON.stringify(body.design || defaultDesign()), String(body.html || '').slice(0, 2_000_000), now(), c.id);
       const snap = JSON.stringify({ subject: str(body.subject, 300), preheader: str(body.preheader, 300), mode: body.mode === 'html' ? 'html' : 'blocks', design: body.design || defaultDesign(), html: String(body.html || '').slice(0, 2_000_000) });
       const last = db.get('SELECT saved_at, snapshot FROM campaign_versions WHERE campaign_id=? ORDER BY id DESC LIMIT 1', c.id);
@@ -506,8 +533,11 @@ export function registerApi(router, { db, worker, version }) {
   });
   api('DELETE', '/campaigns/:id', ({ res, params }) => {
     const c = getCampaign(params.id);
+    need(!db.get('SELECT 1 x FROM automations WHERE campaign_id=?', c.id), 'הגליון משמש אוטומציה. קודם יש למחוק את האוטומציה', 409);
     need(c.status !== 'sending', 'קודם יש להשהות את השליחה', 409);
+    fs.rmSync(path.join(db.dataDir, 'attachments', String(c.id)), { recursive: true, force: true });
     db.tx(() => {
+      db.run('DELETE FROM poll_votes WHERE campaign_id=?', c.id);
       db.run('DELETE FROM link_clicks WHERE link_id IN (SELECT id FROM links WHERE campaign_id=?)', c.id);
       db.run('DELETE FROM links WHERE campaign_id=?', c.id);
       db.run('DELETE FROM deliveries WHERE campaign_id=?', c.id);
@@ -523,7 +553,7 @@ export function registerApi(router, { db, worker, version }) {
     const as = str(query.get('as'), 254).trim();
     let who = { id: 0, email: 'name@example.com', name: user.username };
     if (as) {
-      who = db.get('SELECT id, email, name FROM subscribers WHERE email=?', as);
+      who = db.get('SELECT id, email, name, fields FROM subscribers WHERE email=?', as);
       need(who, 'לא נמצא נמען עם הכתובת הזו', 404);
     }
     sendHtml(res, previewHtml(db, c, who).html);
@@ -555,6 +585,7 @@ export function registerApi(router, { db, worker, version }) {
     const out = checkEmail({
       subject: c.subject, preheader: c.preheader, html, fromEmail: c.from_email || settings.fromEmail,
       design: c.mode === 'html' ? null : (() => { try { return JSON.parse(c.design); } catch { return null; } })(),
+      extraTags: customFields(db).map((f) => f.key),
       hasLists: !!db.get('SELECT 1 x FROM campaign_lists WHERE campaign_id=?', c.id),
     });
     if (body.links) {
@@ -595,7 +626,7 @@ export function registerApi(router, { db, worker, version }) {
         const raw = buildMessage({
           from: { name: c.from_name || settings.fromName, email: fromEmail }, to: { name: '', email },
           replyTo: c.reply_to || settings.replyTo, subject: '[בדיקה] ' + c.subject, html: p.html, text: htmlToText(p.html),
-          domain: fromEmail.split('@')[1],
+          domain: fromEmail.split('@')[1], attachments: campaignAttachments(db, c),
           headers: { 'List-Unsubscribe': `<${p.baseUrl}/u/${p.token}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' },
         });
         try { await conn.send(settings.bounceAddress || fromEmail, email, raw); results.push({ email, ok: true }); }
@@ -609,6 +640,7 @@ export function registerApi(router, { db, worker, version }) {
 
   api('POST', '/campaigns/:id/send', ({ res, params, body }) => {
     const c = getCampaign(params.id);
+    need(!c.auto, 'הגליון הזה משמש אוטומציה ונשלח לבד למצטרפים חדשים', 409);
     need(['draft', 'scheduled', 'sent'].includes(c.status), 'הגליון כבר בשליחה', 409);
     need(c.subject.trim(), 'חסר נושא לגליון');
     need(isEmail(c.from_email || db.setting('fromEmail')), 'חסרה כתובת שולח');
@@ -638,12 +670,111 @@ export function registerApi(router, { db, worker, version }) {
     json(res, {
       campaign: campaignOut(db, c),
       timeline: { opens: series('opened_at'), clicks: series('clicked_at') },
+      ab: c.subject_b ? ['a', 'b'].map((v) => {
+        const r = db.get("SELECT COUNT(sent_at) sent, COUNT(opened_at) opened, COUNT(clicked_at) clicked FROM deliveries WHERE campaign_id=? AND variant=?", c.id, v);
+        return { variant: v, subject: v === 'a' ? c.subject : c.subject_b, sent: Number(r.sent), opened: Number(r.opened), clicked: Number(r.clicked) };
+      }) : null,
+      polls: (() => {
+        let blocks = [];
+        try { blocks = (JSON.parse(c.design || '{}').blocks || []).filter((b) => b && b.type === 'poll' && b.pid); } catch { blocks = []; }
+        return blocks.map((b) => {
+          const votes = db.all('SELECT answer, COUNT(*) n FROM poll_votes WHERE campaign_id=? AND poll=? GROUP BY answer', c.id, b.pid);
+          return { question: b.question, options: (b.options || []).map((o, i) => ({ text: o, votes: Number(votes.find((v) => v.answer === i)?.n || 0) })) };
+        });
+      })(),
       links: db.all(`SELECT l.id, l.url, l.clicks, (SELECT COUNT(*) FROM link_clicks lc WHERE lc.link_id=l.id) uniq
         FROM links l WHERE l.campaign_id=? ORDER BY l.clicks DESC`, c.id).map((l) => ({ ...l, uniq: Number(l.uniq) })),
       bounces: db.all('SELECT type, COUNT(*) n FROM bounces WHERE campaign_id=? GROUP BY type', c.id).map((b) => ({ type: b.type, n: Number(b.n) })),
       errors: db.all("SELECT error, COUNT(*) n FROM deliveries WHERE campaign_id=? AND status IN ('failed','bounced') AND error IS NOT NULL GROUP BY error ORDER BY n DESC LIMIT 10", c.id)
         .map((e) => ({ error: e.error, n: Number(e.n) })),
     });
+  });
+
+  // ---------- קבצים מצורפים ----------
+  const attList = (c) => { try { return JSON.parse(c.attachments || '[]'); } catch { return []; } };
+  api('POST', '/campaigns/:id/attachments', ({ req, res, params, raw }) => {
+    const c = getCampaign(params.id);
+    need(['draft', 'scheduled', 'paused'].includes(c.status), 'אי אפשר לשנות קבצים בגליון שנשלח או נמצא בשליחה', 409);
+    let name = '';
+    try { name = decodeURIComponent(String(req.headers['x-filename'] || '')); } catch { name = ''; }
+    name = path.basename(name.replace(/\\/g, '/')).replace(/[\x00-\x1f"<>|:*?]/g, '').slice(0, 120);
+    const type = ATTACH_TYPES[path.extname(name).toLowerCase()];
+    need(name && type, 'אפשר לצרף קובצי PDF, Word, Excel, טקסט, ICS ותמונות PNG או JPG');
+    need(raw && raw.length, 'הקובץ ריק');
+    const list = attList(c);
+    need(list.length < 5, 'אפשר לצרף עד חמישה קבצים');
+    need(list.reduce((n, a) => n + a.size, 0) + raw.length <= 6 * 1024 * 1024, 'סך הקבצים המצורפים מוגבל ל-6MB');
+    const id = crypto.randomBytes(8).toString('hex');
+    const dir = path.join(db.dataDir, 'attachments', String(c.id));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, id), raw);
+    list.push({ id, name, type, size: raw.length });
+    db.run('UPDATE campaigns SET attachments=?, updated_at=? WHERE id=?', JSON.stringify(list), now(), c.id);
+    json(res, { attachments: list });
+  }, { bodyLimit: 6 * 1024 * 1024, rawBody: true });
+  api('DELETE', '/campaigns/:id/attachments/:aid', ({ res, params }) => {
+    const c = getCampaign(params.id);
+    need(['draft', 'scheduled', 'paused'].includes(c.status), 'אי אפשר לשנות קבצים בגליון שנשלח או נמצא בשליחה', 409);
+    const list = attList(c);
+    const hit = list.find((a) => a.id === params.aid);
+    need(hit, 'הקובץ לא נמצא', 404);
+    fs.rmSync(path.join(db.dataDir, 'attachments', String(c.id), hit.id), { force: true });
+    const rest = list.filter((a) => a !== hit);
+    db.run('UPDATE campaigns SET attachments=?, updated_at=? WHERE id=?', JSON.stringify(rest), now(), c.id);
+    json(res, { attachments: rest });
+  }, { perm: 'campaigns.edit' });
+
+  // ---------- אוטומציות: מייל שנשלח לבד למי שמצטרף לרשימה ----------
+  const autoOut = (a) => ({
+    id: a.id, name: a.name, listId: a.list_id, campaignId: a.campaign_id, delayHours: a.delay_hours, active: !!a.active, createdAt: a.created_at,
+    subject: db.get('SELECT subject FROM campaigns WHERE id=?', a.campaign_id)?.subject || '',
+    sent: Number(db.get('SELECT COUNT(sent_at) n FROM deliveries WHERE campaign_id=?', a.campaign_id).n),
+    pending: Number(db.get("SELECT COUNT(*) n FROM deliveries WHERE campaign_id=? AND status='pending'", a.campaign_id).n),
+  });
+  const getAuto = (id) => { const a = db.get('SELECT * FROM automations WHERE id=?', int(id)); need(a, 'האוטומציה לא נמצאה', 404); return a; };
+  api('GET', '/automations', ({ res }) => json(res, db.all('SELECT * FROM automations ORDER BY list_id, delay_hours, id').map(autoOut)));
+  api('POST', '/automations', ({ res, body }) => {
+    const name = str(body.name, 120).trim();
+    need(name, 'חסר שם לאוטומציה');
+    need(db.get('SELECT 1 x FROM lists WHERE id=?', int(body.listId)), 'הרשימה לא נמצאה', 404);
+    const c = getCampaign(body.campaignId);
+    need(c.status === 'draft', 'אפשר לבחור רק גליון במצב טיוטה', 409);
+    need(!db.get('SELECT 1 x FROM automations WHERE campaign_id=?', c.id), 'הגליון כבר משמש אוטומציה אחרת', 409);
+    const delay = Math.min(24 * 365, Math.max(0, Math.round(Number(body.delayHours) || 0)));
+    const r = db.tx(() => {
+      db.run('UPDATE campaigns SET auto=1 WHERE id=?', c.id);
+      return db.run('INSERT INTO automations(name, list_id, campaign_id, delay_hours, active, created_at) VALUES(?,?,?,?,0,?)', name, int(body.listId), c.id, delay, now());
+    });
+    json(res, { id: Number(r.lastInsertRowid) });
+  });
+  api('POST', '/automations/:id/toggle', ({ res, params, body }) => {
+    const a = getAuto(params.id);
+    const c = getCampaign(a.campaign_id);
+    if (body.active) {
+      need(c.subject.trim(), 'חסר נושא לגליון של האוטומציה');
+      need(isEmail(c.from_email || db.setting('fromEmail')), 'חסרה כתובת שולח');
+      prepareCampaign(db, c);
+      // מועד ההפעלה הראשון קובע ממתי סופרים מצטרפים. הפעלה מחדש אחרי השהיה לא שולחת למי שהצטרף לפניה
+      db.tx(() => {
+        db.run("UPDATE campaigns SET status='sending', started_at=COALESCE(started_at, ?), updated_at=? WHERE id=?", now(), now(), c.id);
+        db.run('UPDATE automations SET active=1 WHERE id=?', a.id);
+      });
+    } else {
+      db.tx(() => {
+        db.run("UPDATE campaigns SET status='paused', updated_at=? WHERE id=?", now(), c.id);
+        db.run('UPDATE automations SET active=0 WHERE id=?', a.id);
+      });
+    }
+    json(res, { ok: true });
+  });
+  api('DELETE', '/automations/:id', ({ res, params }) => {
+    const a = getAuto(params.id);
+    db.tx(() => {
+      db.run('DELETE FROM automations WHERE id=?', a.id);
+      db.run("UPDATE campaigns SET auto=0, status=CASE WHEN EXISTS (SELECT 1 FROM deliveries d WHERE d.campaign_id=campaigns.id AND d.sent_at IS NOT NULL) THEN 'sent' ELSE 'draft' END WHERE id=?", a.campaign_id);
+      db.run("DELETE FROM deliveries WHERE campaign_id=? AND status='pending'", a.campaign_id);
+    });
+    json(res, { ok: true });
   });
 
   api('POST', '/campaigns/:id/public', ({ res, params, body }) => {
@@ -711,7 +842,7 @@ export function registerApi(router, { db, worker, version }) {
         if (k === 'smtpPass' && !body.smtpPass && !body.clearSmtpPass) continue;
         if (k === 'googleClientSecret' && !body.googleClientSecret && !body.clearGoogleSecret) continue;
         if (k === 'formColor' && !/^#[0-9a-f]{6}$/i.test(body[k])) continue;
-        db.setSetting(k, k === 'baseUrl' ? String(body[k]).replace(/\/+$/, '') : str(body[k], k === 'formIntro' || k === 'confirmText' ? 2000 : 500).trim());
+        db.setSetting(k, k === 'baseUrl' ? String(body[k]).replace(/\/+$/, '') : str(body[k], ['formIntro', 'confirmText', 'customFields'].includes(k) ? 2000 : 500).trim());
       }
     });
     json(res, { ok: true });
