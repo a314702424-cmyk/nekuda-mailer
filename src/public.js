@@ -1,4 +1,6 @@
-import { html, send, redirect, clientIp } from './http.js';
+import crypto from 'node:crypto';
+import { html, send, redirect, clientIp, parseCookies } from './http.js';
+import { startSession } from './api.js';
 import { now } from './db.js';
 import { esc } from '../web/shared/render.js';
 import { readToken, personalize } from './track.js';
@@ -14,7 +16,7 @@ const page = (title, body) => `<!DOCTYPE html><html lang="he" dir="rtl"><head><m
 h1{font-size:22px;margin:0 0 12px}p{line-height:1.6;color:#4b5563}
 input{width:100%;box-sizing:border-box;padding:12px;margin:6px 0;border:1px solid #cfd4dc;border-radius:8px;font-size:16px}
 button{width:100%;padding:13px;margin-top:10px;border:0;border-radius:8px;background:#1b4fd8;color:#fff;font-size:16px;font-weight:bold;cursor:pointer}
-.hp{position:absolute;left:-9999px}</style></head><body><div class="box">${body}</div></body></html>`;
+.hp{position:absolute;width:1px;height:1px;padding:0;border:0;opacity:0;overflow:hidden;clip-path:inset(50%)}</style></head><body><div class="box">${body}</div></body></html>`;
 
 export function registerPublic(router, { db }) {
   const secret = () => db.setting('secret');
@@ -73,11 +75,20 @@ export function registerPublic(router, { db }) {
     html(res, personalize(c.prepared_html, { baseUrl: db.setting('baseUrl').replace(/\/+$/, ''), token: params.token, subscriber, isHtml: true }));
   });
 
-  const formPage = (msg = '') => page('הרשמה לרשימת התפוצה', `<h1>הרשמה לרשימת התפוצה</h1>${msg ? `<p>${msg}</p>` : ''}
-    <form method="post" action="/subscribe"><input name="name" placeholder="שם" maxlength="120" autocomplete="name">
+  const formPage = (msg = '', done = false) => {
+    const f = db.settings();
+    const color = /^#[0-9a-f]{6}$/i.test(f.formColor) ? f.formColor : '#1b4fd8';
+    const logo = /^https?:\/\//.test(f.formLogo) ? `<img src="${esc(f.formLogo)}" alt="" style="max-width:220px;max-height:120px;margin-bottom:14px">` : '';
+    const intro = f.formIntro ? `<p>${esc(f.formIntro).replace(/\n/g, '<br>')}</p>` : '';
+    const body = done
+      ? `${logo}<h1>${esc(f.formSuccess || 'תודה, נרשמת')}</h1>`
+      : `${logo}<h1>${esc(f.formTitle || 'הרשמה לרשימת התפוצה')}</h1>${intro}${msg ? `<p style="color:#c0362c">${esc(msg)}</p>` : ''}
+    <form method="post" action="/subscribe">${f.formAskName === '0' ? '' : '<input name="name" placeholder="שם" maxlength="120" autocomplete="name">'}
     <input name="email" type="email" placeholder="כתובת מייל" required autocomplete="email">
     <input class="hp" name="website" tabindex="-1" autocomplete="off">
-    <button type="submit">הרשמה</button></form>`);
+    <button type="submit" style="background:${color}">${esc(f.formButton || 'הרשמה')}</button></form>`;
+    return page(f.formTitle || 'הרשמה לרשימת התפוצה', body);
+  };
 
   router.add('GET', '/subscribe', ({ res }) => html(res, formPage()));
   router.add('POST', '/subscribe', ({ req, res, raw }) => {
@@ -90,7 +101,7 @@ export function registerPublic(router, { db }) {
     if (fresh.n > 10) return html(res, formPage('יותר מדי ניסיונות. נסו שוב מאוחר יותר.'), 429);
     const f = new URLSearchParams(raw ? raw.toString('utf8') : '');
     const email = String(f.get('email') || '').trim().toLowerCase();
-    if (f.get('website')) return html(res, page('תודה', '<h1>תודה, נרשמת</h1>'));
+    if (f.get('website')) return html(res, formPage('', true));
     if (!isEmail(email)) return html(res, formPage('כתובת המייל לא תקינה.'), 400);
     const t = now();
     const note = `טופס הרשמה, ${new Date().toISOString()}, IP ${ip}`;
@@ -107,6 +118,47 @@ export function registerPublic(router, { db }) {
         db.run('INSERT OR IGNORE INTO subscriptions(subscriber_id, list_id, created_at) VALUES(?,?,?)', row.id, listId, t);
       }
     });
-    html(res, page('תודה', '<h1>תודה, נרשמת</h1><p>הגליון הבא יגיע אליך למייל.</p>'));
+    html(res, formPage('', true));
   }, { anyBody: true });
+
+  // ---------- כניסה עם Google ----------
+  const authUrl = () => process.env.GOOGLE_AUTH_URL || 'https://accounts.google.com/o/oauth2/v2/auth';
+  const tokenUrl = () => process.env.GOOGLE_TOKEN_URL || 'https://oauth2.googleapis.com/token';
+  const callbackUrl = () => `${db.setting('baseUrl').replace(/\/+$/, '')}/auth/google/callback`;
+  const authFail = (res, msg, status = 403) => html(res, page('כניסה עם Google', `<h1>הכניסה לא הצליחה</h1><p>${esc(msg)}</p><p><a href="/">חזרה לדף הכניסה</a></p>`), status);
+
+  router.add('GET', '/auth/google', ({ res }) => {
+    const clientId = db.setting('googleClientId');
+    if (!clientId || !db.setting('googleClientSecret')) return authFail(res, 'כניסה עם Google לא הוגדרה במערכת.', 404);
+    const state = crypto.randomBytes(24).toString('hex');
+    const secure = db.setting('baseUrl').startsWith('https://') ? '; Secure' : '';
+    res.setHeader('Set-Cookie', `nm_oauth=${state}; HttpOnly; Path=/auth; SameSite=Lax; Max-Age=600${secure}`);
+    const q = new URLSearchParams({ client_id: clientId, redirect_uri: callbackUrl(), response_type: 'code', scope: 'openid email', state, prompt: 'select_account' });
+    redirect(res, `${authUrl()}?${q}`);
+  });
+
+  router.add('GET', '/auth/google/callback', async ({ req, res, query }) => {
+    const state = parseCookies(req).nm_oauth;
+    if (!state || state !== query.get('state') || !query.get('code')) return authFail(res, 'הבקשה לא תקינה או שפג תוקפה. נסה שוב.', 400);
+    const clientId = db.setting('googleClientId');
+    let claims;
+    try {
+      const r = await fetch(tokenUrl(), { method: 'POST', signal: AbortSignal.timeout(10000), headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ code: query.get('code'), client_id: clientId, client_secret: db.setting('googleClientSecret'), redirect_uri: callbackUrl(), grant_type: 'authorization_code' }) });
+      const data = await r.json();
+      if (!r.ok || !data.id_token) throw new Error(data.error_description || data.error || 'אין אסימון');
+      // האסימון התקבל ישירות מ-Google בחיבור מוצפן, ולכן אפשר לסמוך על תוכנו בלי לאמת חתימה
+      claims = JSON.parse(Buffer.from(data.id_token.split('.')[1], 'base64url').toString('utf8'));
+    } catch (e) {
+      return authFail(res, 'Google לא אישר את הכניסה: ' + e.message, 502);
+    }
+    const okIssuer = ['accounts.google.com', 'https://accounts.google.com'].includes(claims.iss) || !!process.env.GOOGLE_TOKEN_URL;
+    if (claims.aud !== clientId || !okIssuer || !(claims.exp > Date.now() / 1000) || claims.email_verified !== true || !claims.email) {
+      return authFail(res, 'פרטי החשבון שהתקבלו מ-Google לא תקינים.');
+    }
+    const u = db.get('SELECT id FROM users WHERE email=? COLLATE NOCASE AND active=1', String(claims.email).toLowerCase());
+    if (!u) return authFail(res, `לחשבון ${claims.email} אין גישה למערכת. פנה למנהל כדי שיוסיף אותך.`);
+    startSession(db, res, u.id);
+    redirect(res, '/');
+  });
 }

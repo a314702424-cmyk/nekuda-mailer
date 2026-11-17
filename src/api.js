@@ -1,14 +1,16 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { HttpError, json, html as sendHtml, clientIp, parseCookies } from './http.js';
+import { HttpError, json, send, html as sendHtml, clientIp, parseCookies } from './http.js';
 import { now, DEFAULT_SETTINGS } from './db.js';
 import { parseContacts, isEmail, csvCell } from './csv.js';
-import { defaultDesign, letterDesign, htmlToText } from '../web/shared/render.js';
+import { defaultDesign, letterDesign, newsletterDesign, htmlToText } from '../web/shared/render.js';
 import { checkEmail, extractLinks } from '../web/shared/check.js';
 import { campaignHtml, makeToken, personalize } from './track.js';
 import { enqueueCampaign, sentToday } from './worker.js';
 import { buildMessage, SmtpConnection, smtpOptions } from './mailer.js';
+import { ALL_PERMS, permFor } from '../web/shared/perms.js';
+import { htmlToPdf, chromePath } from './pdf.js';
 
 const SESSION_DAYS = 30;
 const COOKIE = 'nm_sess';
@@ -29,11 +31,15 @@ function checkPassword(password, stored) {
 export function sessionUser(db, req) {
   const token = parseCookies(req)[COOKIE];
   if (!token) return null;
-  const row = db.get('SELECT u.id, u.username FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>?', token, now());
-  return row || null;
+  const u = db.get('SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>? AND u.active=1', token, now());
+  if (!u) return null;
+  let perms = [];
+  try { perms = JSON.parse(u.perms).filter((x) => ALL_PERMS.includes(x)); } catch { /* הרשאות פגומות: בלי הרשאות */ }
+  if (u.role === 'admin') perms = [...ALL_PERMS];
+  return { id: u.id, username: u.username, email: u.email, role: u.role, perms, can: (perm) => perms.includes(perm) };
 }
 
-function startSession(db, res, userId) {
+export function startSession(db, res, userId) {
   const token = crypto.randomBytes(32).toString('hex');
   db.run('DELETE FROM sessions WHERE expires_at<?', now());
   db.run('INSERT INTO sessions(token, user_id, expires_at) VALUES(?,?,?)', token, userId, now() + SESSION_DAYS * 86400);
@@ -93,12 +99,17 @@ function previewHtml(db, c, subscriber) {
 }
 
 export function registerApi(router, { db, worker, version }) {
-  const api = (method, pattern, handler, opts = {}) => router.add(method, '/api' + pattern, handler, { auth: true, ...opts });
+  const api = (method, pattern, handler, opts = {}) => router.add(method, '/api' + pattern, handler, { auth: true, perm: permFor(method, pattern), ...opts });
 
   // ---------- מצב והתחברות ----------
   router.add('GET', '/api/meta', ({ req, res }) => {
     const user = sessionUser(db, req);
-    json(res, { version, needsSetup: !db.get('SELECT 1 x FROM users LIMIT 1'), user: user ? user.username : null });
+    json(res, {
+      version, needsSetup: !db.get('SELECT 1 x FROM users LIMIT 1'),
+      user: user ? { id: user.id, name: user.username, role: user.role, perms: user.perms } : null,
+      google: !!(db.setting('googleClientId') && db.setting('googleClientSecret')),
+      pdf: !!chromePath(),
+    });
   });
 
   router.add('POST', '/api/setup', ({ res, body }) => {
@@ -106,7 +117,7 @@ export function registerApi(router, { db, worker, version }) {
     const username = str(body.username, 60).trim();
     need(username.length >= 3, 'שם המשתמש קצר מדי');
     need(String(body.password || '').length >= 10, 'הסיסמה חייבת להיות באורך 10 תווים לפחות');
-    const r = db.run('INSERT INTO users(username, pass_hash, created_at) VALUES(?,?,?)', username, hashPassword(body.password), now());
+    const r = db.run("INSERT INTO users(username, pass_hash, created_at, role) VALUES(?,?,?,'admin')", username, hashPassword(body.password), now());
     startSession(db, res, Number(r.lastInsertRowid));
     json(res, { ok: true });
   });
@@ -115,8 +126,8 @@ export function registerApi(router, { db, worker, version }) {
     const ip = clientIp(req);
     const f = loginFails.get(ip);
     if (f && f.until > Date.now() && f.n >= 5) throw new HttpError(429, 'יותר מדי ניסיונות. נסה שוב בעוד רבע שעה');
-    const u = db.get('SELECT * FROM users WHERE username=?', str(body.username, 60).trim());
-    if (!u || !checkPassword(String(body.password || ''), u.pass_hash)) {
+    const u = db.get('SELECT * FROM users WHERE username=? AND active=1', str(body.username, 60).trim());
+    if (!u || !u.pass_hash || !checkPassword(String(body.password || ''), u.pass_hash)) {
       const cur = f && f.until > Date.now() ? f : { n: 0, until: 0 };
       loginFails.set(ip, { n: cur.n + 1, until: Date.now() + 15 * 60000 });
       throw new HttpError(401, 'שם משתמש או סיסמה שגויים');
@@ -134,14 +145,14 @@ export function registerApi(router, { db, worker, version }) {
 
   api('POST', '/password', ({ user, body, res }) => {
     const u = db.get('SELECT * FROM users WHERE id=?', user.id);
-    need(checkPassword(String(body.current || ''), u.pass_hash), 'הסיסמה הנוכחית שגויה', 403);
+    need(!u.pass_hash || checkPassword(String(body.current || ''), u.pass_hash), 'הסיסמה הנוכחית שגויה', 403);
     need(String(body.password || '').length >= 10, 'הסיסמה חייבת להיות באורך 10 תווים לפחות');
     db.run('UPDATE users SET pass_hash=? WHERE id=?', hashPassword(body.password), user.id);
     json(res, { ok: true });
   });
 
   // ---------- לוח בקרה ----------
-  api('GET', '/dashboard', ({ res }) => {
+  api('GET', '/dashboard', ({ res, user }) => {
     const byStatus = {};
     for (const r of db.all('SELECT status, COUNT(*) n FROM subscribers GROUP BY status')) byStatus[r.status] = Number(r.n);
     json(res, {
@@ -152,7 +163,70 @@ export function registerApi(router, { db, worker, version }) {
       dailyLimit: Number(db.setting('dailyLimit')) || 0,
       queue: Number(db.get("SELECT COUNT(*) n FROM deliveries WHERE status='pending'").n),
       worker: worker ? worker.state : null,
-      recent: db.all('SELECT * FROM campaigns ORDER BY id DESC LIMIT 6').map((c) => campaignOut(db, c)),
+      recent: user.can('campaigns.view') ? db.all('SELECT * FROM campaigns ORDER BY id DESC LIMIT 6').map((c) => campaignOut(db, c)) : [],
+    });
+  });
+
+  // ---------- משתמשים והרשאות ----------
+  const userOut = (u) => { let perms = []; try { perms = JSON.parse(u.perms); } catch { /* ריק */ } return { id: u.id, username: u.username, email: u.email, role: u.role, perms, active: !!u.active, hasPassword: !!u.pass_hash, createdAt: u.created_at }; };
+  const admins = (exceptId = 0) => Number(db.get("SELECT COUNT(*) n FROM users WHERE role='admin' AND active=1 AND id<>?", exceptId).n);
+  const userFields = (body, existing) => {
+    const username = str(body.username, 60).trim();
+    const email = str(body.email, 254).trim().toLowerCase();
+    need(username.length >= 3, 'שם המשתמש קצר מדי');
+    need(!email || isEmail(email), 'כתובת המייל לא תקינה');
+    need(!body.password || String(body.password).length >= 10, 'הסיסמה חייבת להיות באורך 10 תווים לפחות');
+    need(body.password || existing?.pass_hash || email, 'צריך סיסמה, או כתובת מייל של Google לכניסה');
+    const clashName = db.get('SELECT id FROM users WHERE username=?', username);
+    need(!clashName || clashName.id === existing?.id, 'שם המשתמש כבר קיים', 409);
+    const clashMail = email && db.get('SELECT id FROM users WHERE email=? COLLATE NOCASE', email);
+    need(!clashMail || clashMail.id === existing?.id, 'כתובת המייל כבר משויכת למשתמש אחר', 409);
+    const role = body.role === 'admin' ? 'admin' : 'user';
+    const perms = (Array.isArray(body.perms) ? body.perms : []).filter((x) => ALL_PERMS.includes(x));
+    return { username, email, role, perms: JSON.stringify(perms), active: body.active === false ? 0 : 1 };
+  };
+  api('GET', '/users', ({ res }) => json(res, db.all('SELECT * FROM users ORDER BY id').map(userOut)));
+  api('POST', '/users', ({ res, body }) => {
+    const f = userFields(body, null);
+    const r = db.run('INSERT INTO users(username, email, pass_hash, role, perms, active, created_at) VALUES(?,?,?,?,?,?,?)',
+      f.username, f.email, body.password ? hashPassword(body.password) : '', f.role, f.perms, f.active, now());
+    json(res, { id: Number(r.lastInsertRowid) });
+  });
+  api('PUT', '/users/:id', ({ res, body, params, user }) => {
+    const existing = db.get('SELECT * FROM users WHERE id=?', int(params.id));
+    need(existing, 'המשתמש לא נמצא', 404);
+    const f = userFields(body, existing);
+    const losesAdmin = existing.role === 'admin' && existing.active && (f.role !== 'admin' || !f.active);
+    need(!losesAdmin || admins(existing.id) > 0, 'חייב להישאר לפחות מנהל פעיל אחד', 409);
+    need(!(existing.id === user.id && !f.active), 'אי אפשר להשבית את החשבון שלך', 409);
+    db.tx(() => {
+      db.run('UPDATE users SET username=?, email=?, role=?, perms=?, active=? WHERE id=?', f.username, f.email, f.role, f.perms, f.active, existing.id);
+      if (body.password) db.run('UPDATE users SET pass_hash=? WHERE id=?', hashPassword(body.password), existing.id);
+      if (existing.id !== user.id && (!f.active || body.password)) db.run('DELETE FROM sessions WHERE user_id=?', existing.id);
+    });
+    json(res, { ok: true });
+  });
+  api('DELETE', '/users/:id', ({ res, params, user }) => {
+    const existing = db.get('SELECT * FROM users WHERE id=?', int(params.id));
+    need(existing, 'המשתמש לא נמצא', 404);
+    need(existing.id !== user.id, 'אי אפשר למחוק את החשבון שלך', 409);
+    need(!(existing.role === 'admin' && existing.active) || admins(existing.id) > 0, 'חייב להישאר לפחות מנהל פעיל אחד', 409);
+    db.tx(() => { db.run('DELETE FROM sessions WHERE user_id=?', existing.id); db.run('DELETE FROM users WHERE id=?', existing.id); });
+    json(res, { ok: true });
+  });
+
+  // ---------- תור שליחה ----------
+  api('GET', '/queue', ({ res }) => {
+    json(res, {
+      worker: worker ? worker.state : null,
+      sentToday: sentToday(db), dailyLimit: Number(db.setting('dailyLimit')) || 0, sendPerSecond: Number(db.setting('sendPerSecond')) || 0,
+      campaigns: db.all(`SELECT c.id, c.subject, c.status, c.scheduled_at,
+        (SELECT COUNT(*) FROM deliveries d WHERE d.campaign_id=c.id AND d.status='pending') pending,
+        (SELECT COUNT(*) FROM deliveries d WHERE d.campaign_id=c.id AND d.status='pending' AND d.tries>0) retrying,
+        (SELECT MIN(next_try) FROM deliveries d WHERE d.campaign_id=c.id AND d.status='pending' AND d.tries>0) next_retry,
+        (SELECT COUNT(*) FROM deliveries d WHERE d.campaign_id=c.id AND d.sent_at IS NOT NULL) sent
+        FROM campaigns c WHERE c.status IN ('sending','paused','scheduled') ORDER BY c.id`)
+        .map((c) => ({ ...c, pending: Number(c.pending), retrying: Number(c.retrying), sent: Number(c.sent) })),
     });
   });
 
@@ -216,6 +290,49 @@ export function registerApi(router, { db, worker, version }) {
       FROM subscribers s ${w} ORDER BY s.id DESC LIMIT ? OFFSET ?`, ...p, size, (page - 1) * size)
       .map((r) => ({ ...r, lists: r.lists ? String(r.lists).split(',').map(Number) : [] }));
     json(res, { total, page, size, rows });
+  });
+
+  const subscriberFilter = (get) => {
+    const where = [];
+    const p = [];
+    const q = str(get('q'), 100).trim();
+    if (q) { where.push('(s.email LIKE ? OR s.name LIKE ?)'); p.push(`%${q}%`, `%${q}%`); }
+    if (STATUSES.includes(get('status'))) { where.push('s.status=?'); p.push(get('status')); }
+    const list = Number(get('list'));
+    if (list > 0) { where.push('EXISTS (SELECT 1 FROM subscriptions sp WHERE sp.subscriber_id=s.id AND sp.list_id=?)'); p.push(list); }
+    return { w: where.length ? 'WHERE ' + where.join(' AND ') : '', p };
+  };
+  api('POST', '/subscribers/bulk', ({ res, body, user }) => {
+    const f = body.filter || {};
+    const { w, p } = subscriberFilter((k) => f[k]);
+    need(w || body.all === true, 'לא נבחר סינון. כדי לפעול על כל הנמענים יש לאשר זאת במפורש');
+    const ids = `SELECT s.id FROM subscribers s ${w}`;
+    const count = Number(db.get(`SELECT COUNT(*) n FROM subscribers s ${w}`, ...p).n);
+    if (body.dryRun) return json(res, { count });
+    const listId = Number(body.listId) || 0;
+    db.tx(() => {
+      switch (body.action) {
+        case 'addToList':
+          need(db.get('SELECT 1 x FROM lists WHERE id=?', listId), 'הרשימה לא נמצאה', 404);
+          db.run(`INSERT OR IGNORE INTO subscriptions(subscriber_id, list_id, created_at) SELECT id, ?, ? FROM (${ids})`, listId, now(), ...p);
+          break;
+        case 'removeFromList':
+          db.run(`DELETE FROM subscriptions WHERE list_id=? AND subscriber_id IN (${ids})`, listId, ...p);
+          break;
+        case 'setStatus':
+          need(STATUSES.includes(body.status), 'מצב לא מוכר');
+          db.run(`UPDATE subscribers SET status=?, unsubscribed_at=CASE WHEN ?='unsubscribed' THEN COALESCE(unsubscribed_at, ?) ELSE NULL END WHERE id IN (${ids})`, body.status, body.status, now(), ...p);
+          break;
+        case 'delete':
+          need(user.can('subscribers.delete'), 'אין לך הרשאה למחוק נמענים', 403);
+          // קודם הנמענים ורק אחר כך השיוכים, כי הסינון עצמו עשוי להישען על השיוך לרשימה
+          db.run(`DELETE FROM subscribers WHERE id IN (${ids})`, ...p);
+          db.run('DELETE FROM subscriptions WHERE subscriber_id NOT IN (SELECT id FROM subscribers)');
+          break;
+        default: need(false, 'פעולה לא מוכרת');
+      }
+    });
+    json(res, { count });
   });
 
   const saveSubscriber = (id, body) => {
@@ -298,7 +415,7 @@ export function registerApi(router, { db, worker, version }) {
   // ---------- ערכת מותג, בלוקים שמורים ----------
   const brand = () => { try { return JSON.parse(db.setting('brand') || '{}') || {}; } catch { return {}; } };
   const newDesign = (template) => {
-    const d = template === 'letter' ? letterDesign() : defaultDesign();
+    const d = template === 'letter' ? letterDesign() : template === 'newsletter' ? newsletterDesign() : defaultDesign();
     const b = brand();
     if (template === 'letter') { delete b.bg; delete b.contentBg; }
     d.settings = { ...d.settings, ...b, utm: '' };
@@ -425,6 +542,7 @@ export function registerApi(router, { db, worker, version }) {
     const html = campaignHtml(c, db);
     const out = checkEmail({
       subject: c.subject, preheader: c.preheader, html, fromEmail: c.from_email || settings.fromEmail,
+      design: c.mode === 'html' ? null : (() => { try { return JSON.parse(c.design); } catch { return null; } })(),
       hasLists: !!db.get('SELECT 1 x FROM campaign_lists WHERE campaign_id=?', c.id),
     });
     if (body.links) {
@@ -512,6 +630,45 @@ export function registerApi(router, { db, worker, version }) {
     });
   });
 
+  const PEOPLE = {
+    sent: 'd.sent_at IS NOT NULL', opened: 'd.opened_at IS NOT NULL', not_opened: 'd.sent_at IS NOT NULL AND d.opened_at IS NULL',
+    clicked: 'd.clicked_at IS NOT NULL', unsubscribed: 'd.unsubscribed_at IS NOT NULL', bounced: "d.status='bounced'",
+    failed: "d.status='failed'", pending: "d.status='pending'",
+  };
+  const peopleSql = (kind) => `FROM deliveries d JOIN subscribers s ON s.id=d.subscriber_id WHERE d.campaign_id=? AND ${PEOPLE[kind]}`;
+  api('GET', '/campaigns/:id/people', ({ res, params, query }) => {
+    const c = getCampaign(params.id);
+    const kind = PEOPLE[query.get('kind')] ? query.get('kind') : 'opened';
+    const page = Math.max(1, Number(query.get('page')) || 1);
+    const total = Number(db.get(`SELECT COUNT(*) n ${peopleSql(kind)}`, c.id).n);
+    const rows = db.all(`SELECT s.id, s.email, s.name, d.status, d.sent_at, d.opened_at, d.opens, d.clicked_at, d.clicks, d.error ${peopleSql(kind)}
+      ORDER BY COALESCE(d.clicked_at, d.opened_at, d.sent_at, 0) DESC LIMIT 50 OFFSET ?`, c.id, (page - 1) * 50);
+    json(res, { kind, total, page, size: 50, rows });
+  });
+  api('GET', '/campaigns/:id/people.csv', ({ res, params, query }) => {
+    const c = getCampaign(params.id);
+    const kind = PEOPLE[query.get('kind')] ? query.get('kind') : 'opened';
+    const iso = (t) => (t ? new Date(t * 1000).toISOString() : '');
+    res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="campaign-${c.id}-${kind}.csv"`, 'Cache-Control': 'no-store' });
+    res.write('\uFEFFemail,name,status,sent,opened,opens,clicked,clicks,error\r\n');
+    for (let offset = 0; ; offset += 5000) {
+      const rows = db.all(`SELECT s.email, s.name, d.status, d.sent_at, d.opened_at, d.opens, d.clicked_at, d.clicks, d.error ${peopleSql(kind)} ORDER BY s.id LIMIT 5000 OFFSET ?`, c.id, offset);
+      if (!rows.length) break;
+      res.write(rows.map((r) => [r.email, r.name, r.status, iso(r.sent_at), iso(r.opened_at), r.opens, iso(r.clicked_at), r.clicks, r.error || ''].map(csvCell).join(',')).join('\r\n') + '\r\n');
+    }
+    res.end();
+  });
+
+  api('GET', '/campaigns/:id/pdf', async ({ res, params, user }) => {
+    const c = getCampaign(params.id);
+    const page = previewHtml(db, c, { id: 0, email: 'name@example.com', name: user.username }).html
+      .replace(/<\/head>/i, '<style>@page{size:A4;margin:10mm}body{-webkit-print-color-adjust:exact;print-color-adjust:exact}</style></head>');
+    let pdf;
+    try { pdf = await htmlToPdf(page); } catch (e) { throw new HttpError(500, 'ההמרה ל-PDF נכשלה: ' + e.message); }
+    need(pdf, 'בשרת לא מותקן Chrome, ולכן אי אפשר להפיק PDF. אפשר להדפיס ל-PDF מהתצוגה המלאה', 501);
+    send(res, 200, pdf, { 'Content-Type': 'application/pdf', 'Content-Length': pdf.length, 'Content-Disposition': `attachment; filename="newsletter-${c.id}.pdf"`, 'Cache-Control': 'no-store' });
+  }, { perm: 'campaigns.view' });
+
   // ---------- הגדרות והעלאות ----------
   api('GET', '/settings', ({ res }) => {
     const s = db.settings();
@@ -519,6 +676,8 @@ export function registerApi(router, { db, worker, version }) {
     for (const k of Object.keys(DEFAULT_SETTINGS)) out[k] = s[k];
     out.hasSmtpPass = !!s.smtpPass;
     out.smtpPass = '';
+    out.hasGoogleSecret = !!s.googleClientSecret;
+    out.googleClientSecret = '';
     json(res, out);
   });
   api('PUT', '/settings', ({ res, body }) => {
@@ -528,7 +687,9 @@ export function registerApi(router, { db, worker, version }) {
       for (const k of Object.keys(DEFAULT_SETTINGS)) {
         if (!(k in body)) continue;
         if (k === 'smtpPass' && !body.smtpPass && !body.clearSmtpPass) continue;
-        db.setSetting(k, k === 'baseUrl' ? String(body[k]).replace(/\/+$/, '') : str(body[k], 500).trim());
+        if (k === 'googleClientSecret' && !body.googleClientSecret && !body.clearGoogleSecret) continue;
+        if (k === 'formColor' && !/^#[0-9a-f]{6}$/i.test(body[k])) continue;
+        db.setSetting(k, k === 'baseUrl' ? String(body[k]).replace(/\/+$/, '') : str(body[k], k === 'formIntro' ? 2000 : 500).trim());
       }
     });
     json(res, { ok: true });

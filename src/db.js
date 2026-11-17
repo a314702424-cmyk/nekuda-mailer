@@ -71,6 +71,15 @@ export const DEFAULT_SETTINGS = {
   sendPerSecond: '5',
   dailyLimit: '0',
   formListId: '',
+  formTitle: 'הרשמה לרשימת התפוצה',
+  formIntro: '',
+  formButton: 'הרשמה',
+  formSuccess: 'תודה, נרשמת. הגליון הבא יגיע אליך למייל.',
+  formColor: '#1b4fd8',
+  formLogo: '',
+  formAskName: '1',
+  googleClientId: '',
+  googleClientSecret: '',
 };
 
 export const now = () => Math.floor(Date.now() / 1000);
@@ -80,6 +89,14 @@ export function openDb(dataDir) {
   const raw = new DatabaseSync(path.join(dataDir, 'mailer.db'));
   raw.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;');
   raw.exec(SCHEMA);
+  // שדרוג מגרסאות קודמות: עמודות המשתמשים שנוספו ב-0.3.0. משתמשים קיימים נשארים מנהלים.
+  if (!raw.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'role')) {
+    raw.exec(`ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT '';
+      ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';
+      ALTER TABLE users ADD COLUMN perms TEXT NOT NULL DEFAULT '[]';
+      ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1;
+      UPDATE users SET role='admin';`);
+  }
   const cache = new Map();
   const stmt = (sql) => {
     let s = cache.get(sql);
