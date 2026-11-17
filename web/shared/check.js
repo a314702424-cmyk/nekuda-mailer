@@ -11,7 +11,20 @@ export function extractLinks(html) {
 }
 
 /** מחזיר { issues:[{level:'error'|'warn'|'info', text}], stats }. */
-export function checkEmail({ subject = '', preheader = '', html = '', hasLists = true, fromEmail = 'x' } = {}) {
+const lum = (hex) => {
+  const h = String(hex || '').replace('#', '');
+  if (!/^[0-9a-f]{6}$/i.test(h)) return null;
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+/** יחס ניגודיות לפי WCAG, בין 1 ל-21. */
+export function contrast(a, b) {
+  const x = lum(a); const y = lum(b);
+  if (x === null || y === null) return 21;
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+}
+
+export function checkEmail({ subject = '', preheader = '', html = '', hasLists = true, fromEmail = 'x', design = null } = {}) {
   const issues = [];
   const add = (level, text) => issues.push({ level, text });
   const body = String(html || '');
@@ -47,6 +60,16 @@ export function checkEmail({ subject = '', preheader = '', html = '', hasLists =
 
   const unknown = [...new Set([...body.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]).filter((t) => !KNOWN_TAGS.includes(t)))];
   if (unknown.length) add('error', `תגים לא מוכרים שיישלחו ריקים: ${unknown.map((t) => `{{${t}}}`).join(', ')}.`);
+  const s = design && design.settings;
+  if (s) {
+    if (Number(s.fontSize) < 14) add('warn', `גודל הטקסט ${s.fontSize}px קטן לקריאה נוחה. מומלץ 16 ומעלה.`);
+    if (Number(s.mobileFontSize) > 0 && Number(s.mobileFontSize) < 14) add('warn', `גודל הטקסט בנייד ${s.mobileFontSize}px קטן מדי.`);
+    if (contrast(s.color, s.contentBg) < 4.5) add('warn', 'הניגודיות בין צבע הטקסט לרקע התוכן נמוכה, והטקסט יהיה קשה לקריאה.');
+    if (contrast(s.link, s.contentBg) < 3) add('warn', 'צבע הקישורים כמעט לא נבדל מהרקע.');
+    for (const b of design.blocks || []) {
+      if (b.type === 'button' && contrast(b.color || s.btnColor, b.bg || s.btnBg) < 3) { add('warn', `בכפתור "${b.text}" הטקסט כמעט לא נראה על הרקע.`); break; }
+    }
+  }
   if (!body.includes('{{unsubscribe_url}}')) add('info', 'אין קישור הסרה בגליון. המערכת תוסיף אחד אוטומטית בתחתית.');
 
   return { issues, stats: { bytes, links: extractLinks(body).length, images: imgs.length, textChars } };

@@ -39,6 +39,25 @@ export function letterDesign() {
   return d;
 }
 
+/** תבנית "גליון מלא": כותרת, דבר המערכת, מדורים וקריאה לפעולה. */
+export function newsletterDesign() {
+  const d = defaultDesign();
+  d.blocks = [
+    { type: 'menu', align: 'center', links: [{ label: 'גליון מספר', href: '{{webview_url}}' }, { label: 'דף הבית', href: 'https://nekuda.org.il/' }] },
+    { type: 'heading', text: 'דבר המערכת', level: 1, align: 'center' },
+    { type: 'text', html: '<p>שלום {{first_name}},</p><p>פתיחה קצרה: על מה הגליון הזה ולמה כדאי לקרוא אותו.</p>', align: 'justify' },
+    { type: 'divider', color: '#d9dce3' },
+    { type: 'heading', text: 'שם המדור', level: 2, align: 'center' },
+    { type: 'text', html: '<p>תוכן המדור.</p>', align: 'justify' },
+    { type: 'divider', color: '#d9dce3' },
+    { type: 'heading', text: 'מדור נוסף', level: 2, align: 'center' },
+    { type: 'text', html: '<p>תוכן המדור.</p>', align: 'justify' },
+    { type: 'button', text: 'יש לך שאלה? כתוב לנו', href: 'https://', align: 'center' },
+    { type: 'footer', html: '<p>קיבלת מייל זה כי נרשמת לרשימת התפוצה שלנו.<br><a href="{{unsubscribe_url}}">להסרה מרשימת התפוצה</a> · <a href="{{webview_url}}">לצפייה בדפדפן</a></p>' },
+  ];
+  return d;
+}
+
 export const youtubeThumb = (url) => {
   const m = /(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([\w-]{6,})/.exec(String(url || ''));
   return m ? `https://img.youtube.com/vi/${m[1]}/hqdefault.jpg` : '';
