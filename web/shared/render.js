@@ -10,7 +10,24 @@ export const FONTS = [
   ["'David', 'Times New Roman', serif", 'David'],
   ["'Times New Roman', Times, serif", 'Times New Roman'],
   ['Georgia, serif', 'Georgia'],
+  // גופני רשת בעברית. נטענים מ-Google Fonts. תוכנת דואר שלא תומכת בהם (למשל Gmail) תציג את הגופן החלופי שאחריהם.
+  ["'Heebo', Arial, sans-serif", 'Heebo (רשת)', 'Heebo:wght@400;700'],
+  ["'Assistant', Arial, sans-serif", 'Assistant (רשת)', 'Assistant:wght@400;700'],
+  ["'Rubik', Arial, sans-serif", 'Rubik (רשת)', 'Rubik:wght@400;700'],
+  ["'Alef', Arial, sans-serif", 'Alef (רשת)', 'Alef:wght@400;700'],
+  ["'Varela Round', Arial, sans-serif", 'Varela Round (רשת)', 'Varela+Round'],
+  ["'Secular One', Arial, sans-serif", 'Secular One (רשת, לכותרות)', 'Secular+One'],
+  ["'Suez One', Georgia, serif", 'Suez One (רשת, לכותרות)', 'Suez+One'],
+  ["'Frank Ruhl Libre', 'Times New Roman', serif", 'Frank Ruhl Libre (רשת)', 'Frank+Ruhl+Libre:wght@400;700'],
+  ["'David Libre', 'David', 'Times New Roman', serif", 'David Libre (רשת)', 'David+Libre:wght@400;700'],
 ];
+const fontOk = (v, d) => (FONTS.some((f) => f[0] === v) ? v : d);
+/** תגי הטעינה של גופני הרשת שמופיעים ב-HTML בפועל. */
+function fontLinks(htmlStr) {
+  const used = (f) => new RegExp(`(font-family:|face=")[^;>]*?${f[0].split(',')[0].replace(/'/g, '')}`, 'i').test(htmlStr);
+  const fams = FONTS.filter((f) => f[2] && used(f)).map((f) => 'family=' + f[2]);
+  return fams.length ? `<link href="https://fonts.googleapis.com/css2?${fams.join('&')}&display=swap" rel="stylesheet">\n` : '';
+}
 
 export function defaultDesign() {
   return {
@@ -100,7 +117,7 @@ function renderBlock(b, s) {
     case 'heading': {
       const level = num(b.level, 2, 1, 3);
       const size = num(b.size, [0, 30, 24, 20][level], 12, 60);
-      return `<tr><td class="pad${level === 1 ? ' h1' : ''}" align="${alignOf(b.align)}" style="${pad}${base}font-size:${size}px;line-height:1.3;font-weight:bold;text-align:${alignOf(b.align)};color:${color(b.color, s.color)};">${esc(b.text)}</td></tr>`;
+      return `<tr><td class="pad${level === 1 ? ' h1' : ''}" align="${alignOf(b.align)}" style="${pad}font-family:${s.headingFont || s.font};font-size:${size}px;line-height:1.3;font-weight:bold;text-align:${alignOf(b.align)};color:${color(b.color, s.color)};">${esc(b.text)}</td></tr>`;
     }
     case 'text':
       return `<tr><td class="pad txt" align="${alignOf(b.align)}" style="${pad}${base}font-size:${s.fontSize}px;line-height:1.6;text-align:${alignOf(b.align)};">${inlineRich(b.html, s)}</td></tr>`;
@@ -117,9 +134,12 @@ function renderBlock(b, s) {
     }
     case 'button': {
       const bg = color(b.bg, s.btnBg);
+      const fg = color(b.color, s.btnColor);
       const r = num(b.radius, s.btnRadius, 0, 40);
       const al = alignOf(b.align, 'center');
-      return `<tr><td class="pad" align="${al}" style="${pad}"><table role="presentation" cellpadding="0" cellspacing="0" border="0" align="${al}"><tr><td bgcolor="${bg}" style="background:${bg};border-radius:${r}px;"><a href="${esc(b.href)}" target="_blank" style="display:inline-block;padding:12px 28px;font-family:${s.font};font-size:${s.fontSize}px;font-weight:bold;color:${color(b.color, s.btnColor)};text-decoration:none;border-radius:${r}px;">${esc(b.text)}</a></td></tr></table></td></tr>`;
+      const [padY, padX, fs] = { s: [8, 18, 14], l: [16, 36, 19] }[b.size] || [12, 26, 16];
+      const full = b.full ? ' width="100%"' : '';
+      return `<tr><td class="pad" align="${al}" style="${pad}"><table role="presentation" cellpadding="0" cellspacing="0" border="0" align="${al}"${full}${b.full ? ' style="width:100%;"' : ''}><tr><td bgcolor="${bg}" align="center" style="background:${bg};border-radius:${r}px;text-align:center;"><a href="${esc(b.href)}" target="_blank" style="display:block;padding:${padY}px ${padX}px;font-family:${s.font};font-size:${fs}px;font-weight:bold;color:${fg};text-decoration:none;border-radius:${r}px;">${esc(b.text)}</a></td></tr></table></td></tr>`;
     }
     case 'columns': {
       const colW = Math.floor((s.width - 48) / 2) - 12;
@@ -168,14 +188,18 @@ function renderBlock(b, s) {
 function renderOne(b, s, synced, depth = 0) {
   if (!b) return '';
   if (b.type === 'synced') return depth > 2 ? '' : renderOne(synced && synced[b.ref], s, synced, depth + 1);
-  const row = renderBlock(b, s);
+  let row = renderBlock(b, s);
   if (!row) return '';
+  const blockBg = color(b.blockBg, '');
+  if (blockBg && ['heading', 'text', 'image', 'button', 'columns', 'menu', 'social', 'video', 'footer'].includes(b.type)) {
+    row = row.replace(/^<tr><td([^>]*?)style="/, `<tr><td$1bgcolor="${blockBg}" style="background:${blockBg};`);
+  }
   if (b.hideMobile) return row.replace(/^<tr/, '<tr class="hm"');
   if (b.hideDesktop) return row.replace(/^<tr/, '<tr class="hd" style="display:none;mso-hide:all;"');
   return row;
 }
 
-export function renderDesign(design, { subject = '', preheader = '', synced = null } = {}) {
+export function renderDesign(design, { subject = '', preheader = '', synced = null, editor = false } = {}) {
   const d = design && design.settings ? design : defaultDesign();
   const s = { ...defaultDesign().settings, ...d.settings };
   s.width = num(s.width, 600, 320, 800);
@@ -185,11 +209,14 @@ export function renderDesign(design, { subject = '', preheader = '', synced = nu
   s.dir = s.dir === 'ltr' ? 'ltr' : 'rtl';
   s.btnBg = color(s.btnBg, '#1b4fd8'); s.btnColor = color(s.btnColor, '#ffffff'); s.btnRadius = num(s.btnRadius, 6, 0, 40);
   const mfs = num(s.mobileFontSize, 0, 0, 30);
-  const rows = (d.blocks || []).map((b) => renderOne(b, s, synced)).join('\n');
+  s.font = fontOk(s.font, FONTS[0][0]);
+  s.headingFont = s.headingFont ? fontOk(s.headingFont, '') : '';
+  // במצב עריכה כל בלוק מסומן במספרו, כדי שלחיצה עליו בתצוגה המקדימה תפתח אותו לעריכה
+  const rows = (d.blocks || []).map((b, i) => { const r = renderOne(b, s, synced); return editor && r ? r.replace(/^<tr/, `<tr data-b="${i}"`) : r; }).join('\n');
   // הריפוד אחרי התקציר מונע מתוכנת הדואר למשוך טקסט מגוף המייל לשורת התצוגה המקדימה
   const pre = preheader
     ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;font-size:1px;line-height:1px;color:${s.bg};">${esc(preheader)}${'&#847;&zwnj;&nbsp;'.repeat(70)}</div>` : '';
-  return `<!DOCTYPE html>
+  const out = `<!DOCTYPE html>
 <html lang="${s.dir === 'rtl' ? 'he' : 'en'}" dir="${s.dir}">
 <head>
 <meta charset="utf-8">
@@ -224,6 +251,9 @@ ${rows}
 </table>
 </body>
 </html>`;
+  const links = fontLinks(out);
+  // בתצוגת העריכה הקישור לגופנים בסוף הגוף, כדי שתצוגה מקדימה לא תיתקע אם Google Fonts חסום או איטי
+  return editor ? out.replace('</body>', links + '</body>') : out.replace('<style>', links + '<style>');
 }
 
 const ENT = { nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", middot: '·', ndash: '–', mdash: '—' };
