@@ -24,7 +24,7 @@ export function contrast(a, b) {
   return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
 }
 
-export function checkEmail({ subject = '', preheader = '', html = '', hasLists = true, fromEmail = 'x', design = null } = {}) {
+export function checkEmail({ subject = '', preheader = '', html = '', hasLists = true, fromEmail = 'x', design = null, extraTags = [] } = {}) {
   const issues = [];
   const add = (level, text) => issues.push({ level, text });
   const body = String(html || '');
@@ -58,7 +58,7 @@ export function checkEmail({ subject = '', preheader = '', html = '', hasLists =
   if (imgs.length && textChars < 150 * imgs.length && textChars < 400) add('warn', 'הרבה תמונות ומעט טקסט. מיילים כאלה נוטים להסתנן כפרסומת או כספאם.');
   if (!imgs.length && textChars < 40) add('warn', 'הגליון כמעט ריק.');
 
-  const unknown = [...new Set([...body.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]).filter((t) => !KNOWN_TAGS.includes(t)))];
+  const unknown = [...new Set([...body.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]).filter((t) => !KNOWN_TAGS.includes(t) && !extraTags.includes(t)))];
   if (unknown.length) add('error', `תגים לא מוכרים שיישלחו ריקים: ${unknown.map((t) => `{{${t}}}`).join(', ')}.`);
   const s = design && design.settings;
   if (s) {

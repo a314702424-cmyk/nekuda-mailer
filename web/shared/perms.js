@@ -2,7 +2,7 @@
 export const PERM_GROUPS = [
   ['גליונות', [
     ['campaigns.view', 'צפייה בגליונות'], ['campaigns.edit', 'יצירה ועריכה, בלוקים שמורים ושליחת בדיקה'],
-    ['campaigns.send', 'שליחה, תזמון והשהיה'], ['campaigns.delete', 'מחיקת גליונות'], ['stats.view', 'נתוני שליחה ורשימות נמענים לפי תגובה'],
+    ['campaigns.send', 'שליחה, תזמון, השהיה ואוטומציות'], ['campaigns.delete', 'מחיקת גליונות'], ['stats.view', 'נתוני שליחה ורשימות נמענים לפי תגובה'],
   ]],
   ['נמענים', [
     ['subscribers.view', 'צפייה בנמענים'], ['subscribers.edit', 'הוספה, עריכה ופעולות מרוכזות'], ['subscribers.delete', 'מחיקת נמענים'],
@@ -28,6 +28,7 @@ const RULES = [
   [/^\/campaigns\/:id\/check$/, 'campaigns.view'],
   [/^\/campaigns/, { GET: 'campaigns.view', DELETE: 'campaigns.delete', _: 'campaigns.edit' }],
   [/^\/queue$/, 'campaigns.view'],
+  [/^\/automations/, { GET: 'campaigns.view', _: 'campaigns.send' }],
 ];
 
 /** ההרשאה הנדרשת לנתיב API. נתיב שלא מופיע בכללים פתוח למנהלים בלבד. */

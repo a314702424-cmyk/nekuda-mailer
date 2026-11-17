@@ -91,6 +91,7 @@ export const BLOCK_DEFAULTS = {
   social: () => ({ type: 'social', align: 'center', links: [{ label: 'האתר שלנו', href: 'https://' }, { label: 'פייסבוק', href: '' }, { label: 'וואטסאפ', href: '' }] }),
   menu: () => ({ type: 'menu', align: 'center', links: [{ label: 'דף הבית', href: 'https://' }, { label: 'צור קשר', href: 'https://' }] }),
   video: () => ({ type: 'video', url: '', thumb: '', caption: 'לצפייה בסרטון' }),
+  poll: () => ({ type: 'poll', pid: Math.random().toString(36).slice(2, 10), question: 'מה דעתך על הגליון?', options: ['מצוין', 'טוב', 'אפשר לשפר'] }),
   html: () => ({ type: 'html', html: '<p>קוד HTML חופשי</p>' }),
   footer: () => ({ type: 'footer', html: '<p><a href="{{unsubscribe_url}}">להסרה מרשימת התפוצה</a></p>' }),
 };
@@ -176,6 +177,13 @@ function renderBlock(b, s) {
       const pic = thumb ? `<a href="${esc(b.url)}" target="_blank" style="text-decoration:none;">${imgTag(thumb, b.caption || 'סרטון', px, 100)}</a><div style="height:10px;line-height:10px;font-size:0;">&nbsp;</div>` : '';
       return `<tr><td class="pad" align="center" style="${pad}text-align:center;">${pic}${cap}</td></tr>`;
     }
+    case 'poll': {
+      const pid = /^[a-z0-9]{4,12}$/.test(b.pid || '') ? b.pid : '';
+      const opts = (b.options || []).map((o) => String(o || '').trim()).filter(Boolean).slice(0, 6);
+      if (!pid || !opts.length) return '';
+      const btns = opts.map((o, i) => `<a href="{{BASE}}/poll/{{TOKEN}}/${pid}/${i}" target="_blank" style="display:inline-block;margin:0 4px 8px 4px;padding:9px 18px;border:2px solid ${s.btnBg};border-radius:${s.btnRadius}px;font-family:${s.font};font-size:15px;font-weight:bold;color:${s.btnBg};text-decoration:none;">${esc(o)}</a>`).join('');
+      return `<tr><td class="pad" align="center" style="${pad}${base}text-align:center;"><div style="font-size:${s.fontSize + 1}px;font-weight:bold;line-height:1.5;margin:0 0 12px 0;">${esc(b.question)}</div>${btns}</td></tr>`;
+    }
     case 'html':
       return `<tr><td class="pad txt" style="${pad}${base}font-size:${s.fontSize}px;line-height:1.6;">${b.html || ''}</td></tr>`;
     case 'footer':
@@ -194,8 +202,11 @@ function renderOne(b, s, synced, depth = 0) {
   if (blockBg && ['heading', 'text', 'image', 'button', 'columns', 'menu', 'social', 'video', 'footer'].includes(b.type)) {
     row = row.replace(/^<tr><td([^>]*?)style="/, `<tr><td$1bgcolor="${blockBg}" style="background:${blockBg};`);
   }
-  if (b.hideMobile) return row.replace(/^<tr/, '<tr class="hm"');
-  if (b.hideDesktop) return row.replace(/^<tr/, '<tr class="hd" style="display:none;mso-hide:all;"');
+  if (b.hideMobile) row = row.replace(/^<tr/, '<tr class="hm"');
+  else if (b.hideDesktop) row = row.replace(/^<tr/, '<tr class="hd" style="display:none;mso-hide:all;"');
+  // תנאי תצוגה: הבלוק נשלח רק לחברי רשימה מסוימת, או רק למי שאינו חבר בה. השרת מסנן לפי הנמען
+  const onlyList = Number(b.onlyList) || 0;
+  if (onlyList > 0) row = `<!--nm-if:${b.notInList ? '!' : ''}L${onlyList}-->${row}<!--nm-end-->`;
   return row;
 }
 
@@ -212,7 +223,7 @@ export function renderDesign(design, { subject = '', preheader = '', synced = nu
   s.font = fontOk(s.font, FONTS[0][0]);
   s.headingFont = s.headingFont ? fontOk(s.headingFont, '') : '';
   // במצב עריכה כל בלוק מסומן במספרו, כדי שלחיצה עליו בתצוגה המקדימה תפתח אותו לעריכה
-  const rows = (d.blocks || []).map((b, i) => { const r = renderOne(b, s, synced); return editor && r ? r.replace(/^<tr/, `<tr data-b="${i}"`) : r; }).join('\n');
+  const rows = (d.blocks || []).map((b, i) => { const r = renderOne(b, s, synced); return editor && r ? r.replace(/<tr/, `<tr data-b="${i}"`) : r; }).join('\n');
   // הריפוד אחרי התקציר מונע מתוכנת הדואר למשוך טקסט מגוף המייל לשורת התצוגה המקדימה
   const pre = preheader
     ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;font-size:1px;line-height:1px;color:${s.bg};">${esc(preheader)}${'&#847;&zwnj;&nbsp;'.repeat(70)}</div>` : '';
