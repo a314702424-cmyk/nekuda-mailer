@@ -30,6 +30,8 @@ export function createApp({ dataDir, startWorker = true, log = console } = {}) {
           ctx.user = sessionUser(db, req);
           if (!ctx.user) throw new HttpError(401, 'נדרשת התחברות');
           if (req.method !== 'GET' && req.headers['x-requested-with'] !== 'nm') throw new HttpError(403, 'בקשה לא מורשית');
+          const perm = route.opts.perm;
+          if (perm && ![].concat(perm).some((p) => ctx.user.can(p))) throw new HttpError(403, 'אין לך הרשאה לפעולה הזו');
         }
         if (req.method !== 'GET') {
           ctx.raw = await readBody(req, route.opts.bodyLimit || 1024 * 1024);
