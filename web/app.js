@@ -52,7 +52,7 @@ function dialog(title, body, actions) {
 }
 
 // ---------- מסגרת וניווט ----------
-const NAV = [['#/', 'לוח בקרה', null], ['#/campaigns', 'גליונות', 'campaigns.view'], ['#/queue', 'תור שליחה', 'campaigns.view'], ['#/subscribers', 'נמענים', 'subscribers.view'],
+const NAV = [['#/', 'לוח בקרה', null], ['#/campaigns', 'גליונות', 'campaigns.view'], ['#/queue', 'תור שליחה', 'campaigns.view'], ['#/automations', 'אוטומציות', 'campaigns.view'], ['#/subscribers', 'נמענים', 'subscribers.view'],
   ['#/lists', 'רשימות תפוצה', 'lists.view'], ['#/import', 'ייבוא', 'subscribers.import'], ['#/settings', 'הגדרות', 'settings.manage'], ['#/users', 'משתמשים', 'users.manage']];
 
 function shell(content) {
@@ -92,7 +92,7 @@ function campaignTable(rows) {
     rows.map((c) => {
       const editable = ['draft', 'scheduled', 'paused'].includes(c.status);
       return h('tr', {},
-        h('td', {}, h('a', { href: editable && can('campaigns.edit') ? `#/campaign/${c.id}` : `#/stats/${c.id}` }, c.subject || '(ללא נושא)')),
+        h('td', {}, h('a', { href: editable && can('campaigns.edit') ? `#/campaign/${c.id}` : `#/stats/${c.id}` }, c.subject || '(ללא נושא)'), c.auto ? h('span', { class: 'tag', style: 'margin-inline-start:6px' }, 'אוטומציה') : null),
         h('td', {}, tag(CAMP_STATUS, c.status)),
         h('td', { class: 'num' }, `${fmt(c.stats.sent)} / ${fmt(c.stats.total)}`),
         h('td', { class: 'num' }, pct(c.stats.opened, c.stats.sent)),
@@ -154,6 +154,18 @@ async function campaignPage(id) {
   const design = c.design || defaultDesign();
   const subject = text(c.subject);
   const preheader = text(c.preheader, { placeholder: 'השורה שמופיעה אחרי הנושא בתיבת הדואר' });
+  const subjectB = text(c.subjectB, { placeholder: 'ריק = בלי בדיקה. חצי מהנמענים יקבלו את הנושא הזה' });
+  const attBox = h('div');
+  const drawAtt = (list) => attBox.replaceChildren(
+    ...list.map((a) => h('div', { class: 'row', style: 'margin-bottom:4px' }, h('span', { class: 'grow' }, `📎 ${a.name} (${fmt(Math.ceil(a.size / 1024))}KB)`),
+      h('button', { class: 'small danger', onclick: safe(async () => { drawAtt((await api('DELETE', `/campaigns/${id}/attachments/${a.id}`)).attachments); }) }, 'הסרה'))),
+    h('input', { type: 'file', accept: '.pdf,.doc,.docx,.xls,.xlsx,.txt,.ics,.png,.jpg,.jpeg', onchange: safe(async (e) => {
+      const file = e.target.files[0]; if (!file) return;
+      const r = await api('POST', `/campaigns/${id}/attachments`, file, { raw: true, headers: { 'X-Filename': encodeURIComponent(file.name), 'Content-Type': 'application/octet-stream' } });
+      drawAtt(r.attachments); toast('הקובץ צורף');
+    }) }),
+    h('p', { class: 'muted small-note' }, 'קובץ מצורף נשלח במלואו לכל נמען, מאט את השליחה ומעלה את הסיכוי לסינון כספאם. לקובץ גדול או לרשימה גדולה עדיף כפתור עם קישור להורדה.'));
+  drawAtt(c.attachments || []);
   const fromName = text(c.fromName);
   const fromEmail = h('input', { type: 'email', value: c.fromEmail, class: 'ltr' });
   const replyTo = h('input', { type: 'email', value: c.replyTo, class: 'ltr' });
@@ -171,7 +183,7 @@ async function campaignPage(id) {
 
   const payload = () => {
     design.settings.utm = utm.value.trim();
-    return { subject: subject.value, preheader: preheader.value, fromName: fromName.value, fromEmail: fromEmail.value,
+    return { subject: subject.value, subjectB: subjectB.value, preheader: preheader.value, fromName: fromName.value, fromEmail: fromEmail.value,
       replyTo: replyTo.value, listIds: lists.values(), mode, design, html: htmlArea.value };
   };
   const save = async (quiet, snapshot = false) => {
@@ -201,7 +213,7 @@ async function campaignPage(id) {
   async function drawBody() {
     if (mode === 'blocks') {
       builder = await mountBuilder(body, design, {
-        upload, blocks: store, notify: toast, onChange: touch,
+        upload, blocks: store, notify: toast, onChange: touch, lists: state.lists,
         meta: () => ({ subject: subject.value, preheader: preheader.value }),
         saveBrand: safe((settings) => api('PUT', '/brand', settings)),
       });
@@ -211,7 +223,7 @@ async function campaignPage(id) {
       const show = () => { frame.srcdoc = htmlArea.value.replace(/\{\{(name|first_name)\}\}/g, 'ישראל ישראלי').replace(/\{\{\w+\}\}/g, '#'); };
       htmlArea.oninput = () => { touch(); clearTimeout(show.t); show.t = setTimeout(show, 300); };
       body.replaceChildren(h('div', { class: 'builder' },
-        h('div', {}, h('p', { class: 'muted' }, 'תגים זמינים: {{name}}, {{first_name}}, {{email}}, {{unsubscribe_url}}, {{webview_url}}, {{preferences_url}} (דף עדכון ההרשמה של הנמען). אם אין קישור הסרה, המערכת מוסיפה אחד אוטומטית.'), htmlArea),
+        h('div', {}, h('p', { class: 'muted' }, 'תגים זמינים: {{name}}, {{first_name}}, {{email}}, {{unsubscribe_url}}, {{webview_url}}, {{preferences_url}} (דף עדכון ההרשמה של הנמען), ושדות מותאמים שהוגדרו בהגדרות. אם אין קישור הסרה, המערכת מוסיפה אחד אוטומטית.'), htmlArea),
         h('div', { class: 'preview-wrap' }, h('div', { class: 'row', style: 'margin-bottom:8px' }, h('b', { class: 'grow' }, 'תצוגה מקדימה'),
           h('button', { class: 'small', onclick: () => wrap.classList.remove('mobile') }, 'מחשב'), h('button', { class: 'small', onclick: () => wrap.classList.add('mobile') }, 'נייד'),
           h('button', { class: 'small', onclick: () => wrap.classList.toggle('dark') }, 'מצב כהה')), wrap)));
@@ -219,7 +231,7 @@ async function campaignPage(id) {
     }
   }
   [subject, preheader].forEach((el) => el.addEventListener('input', () => { touch(); builder?.refresh(); }));
-  [fromName, fromEmail, replyTo, utm].forEach((el) => el.addEventListener('input', touch));
+  [fromName, fromEmail, replyTo, utm, subjectB].forEach((el) => el.addEventListener('input', touch));
 
   const sendTest = safe(async () => {
     const emails = text('', { class: 'ltr', placeholder: 'name@example.com' });
@@ -305,17 +317,21 @@ async function campaignPage(id) {
     h('div', { class: 'bar' }, h('h1', {}, 'עריכת גליון'), saveState, tag(CAMP_STATUS, c.status), modeBtn,
       h('button', { onclick: versions }, 'גרסאות'), h('button', { onclick: fullPreview }, 'תצוגה מלאה'), h('button', { onclick: downloadPdf }, 'הורד כ-PDF'), h('button', { onclick: runCheck }, 'בדיקה'),
       h('button', { onclick: sendTest }, 'שליחת בדיקה'), h('button', { onclick: safe(() => save(false, true)) }, 'שמירה'),
-      c.status === 'scheduled'
+      c.auto ? h('a', { class: 'btn primary', href: '#/automations' }, 'לאוטומציות')
+      : c.status === 'scheduled'
         ? h('button', { class: 'danger', onclick: safe(async () => { await api('POST', `/campaigns/${id}/unschedule`, {}); route(); }) }, 'ביטול תזמון')
         : c.status === 'paused'
           ? h('button', { class: 'primary', onclick: safe(async () => { await save(true); await api('POST', `/campaigns/${id}/resume`, {}); location.hash = `#/stats/${id}`; }) }, 'המשך שליחה')
           : h('button', { class: 'primary', onclick: sendDialog }, 'שליחה…')),
     c.status === 'scheduled' ? h('div', { class: 'notice' }, `הגליון מתוזמן ל-${date(c.scheduledAt)}. שינויים שתשמור עד אז ייכנסו לשליחה.`) : null,
+    c.auto ? h('div', { class: 'notice' }, 'הגליון הזה משמש אוטומציה: הוא נשלח לבד למי שמצטרף לרשימה. אחרי עריכה יש להפעיל את האוטומציה מחדש במסך "אוטומציות".') : null,
     h('div', { class: 'card' },
       h('div', { class: 'row' }, h('div', { class: 'grow' }, field('נושא', subject)), h('div', { class: 'grow' }, field('תקציר', preheader))),
       h('div', { class: 'row' }, h('div', { class: 'grow' }, field('שם השולח', fromName)), h('div', { class: 'grow' }, field('כתובת השולח', fromEmail)), h('div', { class: 'grow' }, field('כתובת לתשובה', replyTo)),
         h('div', { class: 'grow' }, field('שם קמפיין ל-UTM', utm))),
-      h('label', {}, 'רשימות תפוצה'), lists),
+      c.auto ? null : h('div', { class: 'row' }, h('div', { class: 'grow' }, field('נושא חלופי לבדיקת A/B', subjectB))),
+      c.auto ? null : [h('label', {}, 'רשימות תפוצה'), lists],
+      h('label', { style: 'margin-top:10px' }, 'קבצים מצורפים'), attBox),
     body,
   ]);
   lists.addEventListener('change', touch);
@@ -357,6 +373,16 @@ async function statsPage(id) {
       d.links.map((l) => h('tr', {}, h('td', { class: 'ltr', style: 'word-break:break-all' }, l.url), h('td', { class: 'num' }, fmt(l.clicks)), h('td', { class: 'num' }, fmt(l.uniq)))))) : h('p', { class: 'muted' }, 'אין קישורים במעקב.')),
     d.errors.length ? h('div', { class: 'card' }, h('h2', {}, 'שגיאות שליחה נפוצות'), h('table', { class: 'data' },
       d.errors.map((e) => h('tr', {}, h('td', { class: 'ltr' }, e.error), h('td', { class: 'num' }, fmt(e.n)))))) : null,
+    d.ab ? h('div', { class: 'card' }, h('h2', {}, 'בדיקת A/B לשורת הנושא'), h('table', { class: 'data' },
+      h('tr', {}, ['גרסה', 'נושא', 'נשלחו', 'פתחו', 'לחצו'].map((t) => h('th', {}, t))),
+      d.ab.map((v) => h('tr', {}, h('td', {}, v.variant === 'a' ? 'א' : 'ב'), h('td', {}, v.subject), h('td', { class: 'num' }, fmt(v.sent)),
+        h('td', { class: 'num' }, `${fmt(v.opened)} (${pct(v.opened, v.sent)})`), h('td', { class: 'num' }, `${fmt(v.clicked)} (${pct(v.clicked, v.sent)})`)))),
+      h('p', { class: 'muted' }, 'הנמענים חולקו לשתי קבוצות שוות. הפרש קטן בין הגרסאות יכול להיות מקרי, במיוחד ברשימה קטנה.')) : null,
+    d.polls?.length ? h('div', { class: 'card' }, h('h2', {}, 'תוצאות סקר'), d.polls.map((pl) => {
+      const total = pl.options.reduce((n, o) => n + o.votes, 0);
+      return h('div', { style: 'margin-bottom:12px' }, h('b', {}, pl.question), h('table', { class: 'data' },
+        pl.options.map((o) => h('tr', {}, h('td', {}, o.text), h('td', { class: 'num' }, `${fmt(o.votes)} (${pct(o.votes, total)})`)))));
+    }), h('p', { class: 'muted' }, 'כל נמען נספר פעם אחת, לפי הלחיצה האחרונה שלו. סורקי קישורים של תוכנות דואר עלולים להוסיף מעט הצבעות שגויות.')) : null,
     timelineCard(d.timeline),
     peopleCard(id),
   ]);
@@ -426,6 +452,43 @@ async function queuePage() {
   ]);
 }
 
+// ---------- אוטומציות ----------
+async function automationsPage() {
+  const [rows, camps] = await Promise.all([api('GET', '/automations'), api('GET', '/campaigns'), loadLists()]);
+  const drafts = camps.filter((c) => c.status === 'draft' && !c.auto);
+  const listName = (lid) => state.lists.find((l) => l.id === lid)?.name || '(רשימה שנמחקה)';
+  const delayText = (hrs) => (!hrs ? 'מיד' : hrs % 24 === 0 ? `אחרי ${hrs / 24} ימים` : `אחרי ${hrs} שעות`);
+  const create = () => {
+    const name = text('', { placeholder: 'למשל: מייל ברוך הבא' });
+    const list = h('select', {}, state.lists.map((l) => h('option', { value: l.id }, l.name)));
+    const camp = h('select', {}, drafts.map((c) => h('option', { value: c.id }, c.subject || '(ללא נושא)')));
+    const amount = h('input', { type: 'number', min: 0, value: 0, style: 'width:90px' });
+    const unit = h('select', {}, h('option', { value: 1 }, 'שעות'), h('option', { value: 24 }, 'ימים'));
+    dialog('אוטומציה חדשה', h('div', {},
+      h('p', { class: 'muted' }, 'המייל יישלח לבד לכל מי שמצטרף לרשימה מעכשיו והלאה. מי שכבר ברשימה לא יקבל אותו. לסדרת מיילים יוצרים כמה אוטומציות לאותה רשימה, עם השהיות שונות.'),
+      field('שם', name), field('כשמצטרפים לרשימה', list),
+      field('לשלוח את הגליון (מתוך הטיוטות)', drafts.length ? camp : h('p', { class: 'notice' }, 'אין גליון במצב טיוטה. קודם יוצרים גליון במסך "גליונות" ושומרים אותו.')),
+      field('השהיה מרגע ההצטרפות (0 = מיד)', h('div', { class: 'row' }, amount, unit))), (close) => [h('button', { onclick: close }, 'ביטול'),
+      h('button', { class: 'primary', disabled: !drafts.length || !state.lists.length, onclick: safe(async () => {
+        await api('POST', '/automations', { name: name.value, listId: Number(list.value), campaignId: Number(camp.value), delayHours: Number(amount.value) * Number(unit.value) });
+        close(); toast('האוטומציה נוצרה. היא כבויה עד שתפעיל אותה.'); route();
+      }) }, 'יצירה')]);
+  };
+  const manage = can('campaigns.send');
+  shell([
+    h('div', { class: 'bar' }, h('h1', {}, 'אוטומציות'), manage ? h('button', { class: 'primary', onclick: create }, 'אוטומציה חדשה') : null),
+    h('p', { class: 'muted' }, 'מיילים שנשלחים לבד: ברוך הבא למצטרף חדש, או סדרת מיילים במרווחי זמן. ההודעות נספרות בתקרה היומית כמו כל שליחה.'),
+    rows.length ? h('div', { class: 'scroll' }, h('table', { class: 'data' },
+      h('tr', {}, ['שם', 'רשימה', 'גליון', 'מתי', 'נשלחו', 'ממתינים', 'מצב', ''].map((t) => h('th', {}, t))),
+      rows.map((a) => h('tr', {}, h('td', {}, h('b', {}, a.name)), h('td', {}, listName(a.listId)),
+        h('td', {}, h('a', { href: a.active ? `#/stats/${a.campaignId}` : `#/campaign/${a.campaignId}` }, a.subject || '(ללא נושא)')),
+        h('td', {}, delayText(a.delayHours)), h('td', { class: 'num' }, fmt(a.sent)), h('td', { class: 'num' }, fmt(a.pending)),
+        h('td', {}, h('span', { class: 'tag ' + (a.active ? 'good' : 'warn') }, a.active ? 'פעילה' : 'כבויה')),
+        h('td', {}, manage ? [h('button', { class: 'small', onclick: safe(async () => { await api('POST', `/automations/${a.id}/toggle`, { active: !a.active }); route(); }) }, a.active ? 'כיבוי (לעריכה)' : 'הפעלה'),
+          h('button', { class: 'small danger', onclick: safe(async () => { if (!window.confirm(`למחוק את האוטומציה "${a.name}"? הגליון עצמו יישאר.`)) return; await api('DELETE', `/automations/${a.id}`); route(); }) }, 'מחיקה')] : null))))) : h('p', { class: 'muted' }, 'עדיין אין אוטומציות.'),
+  ]);
+}
+
 // ---------- משתמשים והרשאות ----------
 async function usersPage() {
   const rows = await api('GET', '/users');
@@ -478,6 +541,7 @@ async function subscribersPage() {
     const name = text(row?.name || '');
     const st = h('select', {}, Object.entries(SUB_STATUS).map(([k, v]) => h('option', { value: k, selected: (row?.status || 'active') === k }, v[0])));
     const lists = listChecks(row?.lists || []);
+    const custom = (state.meta.fields || []).map((f) => ({ key: f.key, el: text(row?.fields?.[f.key] || '') , label: f.label }));
     const hist = h('div', { style: 'margin-top:14px' });
     if (row) {
       hist.append(h('button', { class: 'small', onclick: safe(async () => {
@@ -495,11 +559,11 @@ async function subscribersPage() {
           d.bounces.length ? h('p', { class: 'muted' }, 'קפיצות: ' + d.bounces.map((b) => `${date(b.created_at)} (${b.type})`).join(', ')) : null);
       }) }, 'הצגת היסטוריה'));
     }
-    dialog(row ? 'עריכת נמען' : 'נמען חדש', h('div', {}, field('כתובת מייל', email), field('שם', name), field('מצב', st), h('label', {}, 'רשימות'), lists, hist), (close) => [
+    dialog(row ? 'עריכת נמען' : 'נמען חדש', h('div', {}, field('כתובת מייל', email), field('שם', name), field('מצב', st), custom.map((f) => field(f.label, f.el)), h('label', {}, 'רשימות'), lists, hist), (close) => [
       row ? h('button', { class: 'danger', onclick: safe(async () => { if (!window.confirm('למחוק את הנמען לצמיתות?')) return; await api('DELETE', `/subscribers/${row.id}`); close(); load(); }) }, 'מחיקה') : null,
       h('button', { onclick: close }, 'ביטול'),
       h('button', { class: 'primary', onclick: safe(async () => {
-        await api(row ? 'PUT' : 'POST', row ? `/subscribers/${row.id}` : '/subscribers', { email: email.value, name: name.value, status: st.value, listIds: lists.values() });
+        await api(row ? 'PUT' : 'POST', row ? `/subscribers/${row.id}` : '/subscribers', { email: email.value, name: name.value, status: st.value, listIds: lists.values(), fields: Object.fromEntries(custom.map((f) => [f.key, f.el.value])) });
         close(); load();
       }) }, 'שמירה')]);
   };
@@ -634,6 +698,9 @@ async function settingsPage() {
       field('כתובת לקפיצות (Return-Path). המערכת מוסיפה לה מזהה נמען אחרי סימן +', inp('bounceAddress', { class: 'ltr', placeholder: 'bounce@example.org' })),
       field('כתובת פיזית של העסק (מופיעה בתחתית אוטומטית)', inp('companyAddress')),
       ),
+    h('div', { class: 'card' }, h('h2', {}, 'שדות מותאמים לנמען'),
+      h('p', { class: 'muted' }, 'שורה לכל שדה, בצורה מפתח:כותרת. המפתח באנגלית קטנה בלי רווחים. למשל city:עיר. בגליון כותבים {{city}} והמערכת מחליפה אותו בערך של כל נמען. את הערכים ממלאים בחלון עריכת הנמען. השינוי ייראה במסכים אחרי רענון הדף.'),
+      (f.customFields = h('textarea', { class: 'ltr-mixed', value: s.customFields || '', style: 'min-height:70px', placeholder: 'city:עיר\ncompany:חברה' }))),
     h('div', { class: 'card' }, h('h2', {}, 'דף ההרשמה הציבורי'),
       h('p', { class: 'muted' }, 'הדף נמצא בכתובת ', h('a', { href: '/subscribe', target: '_blank' }, '/subscribe'), '. אחרי שמירה אפשר לפתוח אותו ולראות את השינוי.'),
       h('div', { class: 'row' }, h('div', { class: 'grow' }, field('כותרת', inp('formTitle'))), h('div', { class: 'grow' }, field('טקסט הכפתור', inp('formButton'))),
@@ -688,7 +755,7 @@ async function route() {
     const hash = location.hash || '#/';
     const m = /^#\/(campaign|stats)\/(\d+)$/.exec(hash);
     if (m) return await (m[1] === 'campaign' ? campaignPage(m[2]) : statsPage(m[2]));
-    const pages = { '#/': dashboardPage, '#/campaigns': campaignsPage, '#/queue': queuePage, '#/subscribers': subscribersPage, '#/lists': listsPage, '#/import': importPage, '#/settings': settingsPage, '#/users': usersPage };
+    const pages = { '#/': dashboardPage, '#/campaigns': campaignsPage, '#/queue': queuePage, '#/automations': automationsPage, '#/subscribers': subscribersPage, '#/lists': listsPage, '#/import': importPage, '#/settings': settingsPage, '#/users': usersPage };
     return await (pages[hash] || dashboardPage)();
   } catch (e) {
     toast(e.message, true);

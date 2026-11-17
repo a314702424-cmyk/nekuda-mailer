@@ -139,3 +139,6 @@ pre.code{direction:ltr;text-align:left;background:#f4f6fa;border:1px solid var(-
 .rte-tools .swatch.mark{color:#f2c200}
 .rte-tools .swatch input{position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer;padding:0;border:0}
 .rte img{max-width:100%;height:auto}
+
+/* גרסה 0.6.0 */
+.vis select.cond{width:auto;max-width:220px;padding:3px 6px;font-size:13px}

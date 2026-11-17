@@ -2,7 +2,7 @@ import { renderDesign, BLOCK_DEFAULTS, FONTS, youtubeThumb } from './shared/rend
 
 const LABELS = {
   heading: 'כותרת', text: 'טקסט', image: 'תמונה', button: 'כפתור', columns: 'שני טורים', divider: 'קו מפריד', spacer: 'רווח',
-  social: 'רשתות וקישורים', menu: 'תפריט', video: 'סרטון', html: 'קוד HTML', footer: 'תחתית', synced: 'בלוק מסונכרן',
+  social: 'רשתות וקישורים', menu: 'תפריט', video: 'סרטון', poll: 'סקר', html: 'קוד HTML', footer: 'תחתית', synced: 'בלוק מסונכרן',
 };
 const ALIGNS = [['right', 'ימין'], ['center', 'מרכז'], ['left', 'שמאל'], ['justify', 'מיושר']];
 const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -28,7 +28,7 @@ const field = (label, control) => h('div', {}, h('label', {}, label), control);
  * opts: upload(file), meta(), onChange(), saveBrand(settings), blocks: { list, save, update, remove }, notify(msg, bad)
  */
 export async function mountBuilder(container, design, opts) {
-  const { upload, meta, onChange, saveBrand, blocks: store, notify = () => {} } = opts;
+  const { upload, meta, onChange, saveBrand, blocks: store, notify = () => {}, lists: allLists = [] } = opts;
   let saved = store ? await store.list() : [];
   const syncedMap = () => Object.fromEntries(saved.filter((b) => b.synced).map((b) => [b.id, b.block]));
 
@@ -218,6 +218,9 @@ export async function mountBuilder(container, design, opts) {
         return [field('קישור לסרטון', input(b, 'url', 'url', { class: 'ltr' })), field('תמונה (לא חובה)', imageField(b, 'thumb')), field('כיתוב', input(b, 'caption')), hint,
           h('p', { class: 'muted small-note' }, 'תוכנות דואר לא מנגנות וידאו. הבלוק מציג תמונה שמובילה לסרטון.')];
       }
+      case 'poll': return [field('השאלה', input(b, 'question')),
+        field('תשובות, שורה לכל תשובה (עד שש)', h('textarea', { value: (b.options || []).join('\n'), style: 'min-height:84px', oninput: (e) => { b.options = e.target.value.split('\n').map((x) => x.trim()).filter(Boolean).slice(0, 6); changed(); } })),
+        h('p', { class: 'muted small-note' }, 'כל תשובה היא כפתור במייל. לחיצה רושמת את התשובה, והתוצאות מופיעות במסך הנתונים של הגליון.')];
       case 'html': return [h('textarea', { class: 'code', style: 'min-height:120px', value: b.html || '', oninput: (e) => { b.html = e.target.value; changed(); } })];
       case 'footer': return [richText(b), h('p', { class: 'muted small-note' }, 'התג {{unsubscribe_url}} הוא קישור ההסרה. אם יוסר, המערכת תוסיף קישור הסרה אוטומטית.')];
       default: return [];
@@ -226,7 +229,12 @@ export async function mountBuilder(container, design, opts) {
 
   const visibility = (b) => h('div', { class: 'row vis' },
     check(b, 'hideMobile', 'להסתיר בנייד', () => { if (b.hideMobile) b.hideDesktop = false; drawBlocks(); }),
-    check(b, 'hideDesktop', 'להסתיר במחשב', () => { if (b.hideDesktop) b.hideMobile = false; drawBlocks(); }));
+    check(b, 'hideDesktop', 'להסתיר במחשב', () => { if (b.hideDesktop) b.hideMobile = false; drawBlocks(); }),
+    allLists.length ? h('select', { class: 'cond', title: 'תנאי תצוגה לפי נמען', onchange: (e) => {
+      const v = e.target.value; b.onlyList = Math.abs(Number(v)) || 0; b.notInList = v.startsWith('-'); if (!b.onlyList) { delete b.onlyList; delete b.notInList; } changed();
+    } }, h('option', { value: '0' }, 'להציג לכל הנמענים'),
+    allLists.map((l) => h('option', { value: l.id, selected: b.onlyList === l.id && !b.notInList }, `רק לחברי: ${l.name}`)),
+    allLists.map((l) => h('option', { value: -l.id, selected: b.onlyList === l.id && !!b.notInList }, `רק למי שלא ב: ${l.name}`))) : null);
 
   const list = h('div', { class: 'b-side' });
   let dragFrom = null;
@@ -270,7 +278,7 @@ export async function mountBuilder(container, design, opts) {
         notify('הבלוק נשמר');
       }) : null;
       const isOpen = openSet.has(b);
-      return h('section', { class: 'block' + (b.hideMobile || b.hideDesktop ? ' partial' : '') + (isOpen ? ' open' : ''),
+      return h('section', { class: 'block' + (b.hideMobile || b.hideDesktop || b.onlyList ? ' partial' : '') + (isOpen ? ' open' : ''),
         ondragover: (e) => { if (dragFrom !== null && dragFrom !== i) { e.preventDefault(); e.currentTarget.classList.add('drop'); } },
         ondragleave: (e) => e.currentTarget.classList.remove('drop'),
         ondrop: (e) => {
