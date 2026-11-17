@@ -525,6 +525,80 @@ try {
   assert.ok(!renderDesign(d5, {}).includes('Comic Sans'), 'גופן לא מוכר נדחה');
   step('עורך: גופני רשת, גופן כותרות, גדלי כפתור, רקע לבלוק וסימוני עריכה');
 
+  {
+  // --- גרסה 0.6.0: שדות מותאמים, קבצים מצורפים, A/B, תנאי תצוגה, סקר ואוטומציות ---
+  await ok('PUT', '/api/settings', { customFields: 'city:עיר\nname:אסור\nBad Key:x\ncity:כפול' });
+  assert.deepEqual((await ok('GET', '/api/meta')).fields, [{ key: 'city', label: 'עיר' }]);
+  const L6 = (await ok('POST', '/api/lists', { name: 'רשימת 0.6' })).id;
+  const Lvip = (await ok('POST', '/api/lists', { name: 'VIP' })).id;
+  await ok('POST', '/api/import', { text: 'v1@six.org,אחת\nv2@six.org,שתיים\nv3@six.org,שלוש\nv4@six.org,ארבע', listIds: [L6], status: 'active' });
+  const six = app.db.all("SELECT id, email FROM subscribers WHERE email LIKE '%@six.org' ORDER BY id");
+  await ok('PUT', `/api/subscribers/${six[0].id}`, { email: six[0].email, name: 'אחת', status: 'active', listIds: [L6, Lvip], fields: { city: 'חיפה <b>', hack: 'x' } });
+  assert.equal(app.db.get('SELECT fields FROM subscribers WHERE id=?', six[0].id).fields, '{"city":"חיפה <b>"}');
+  const joined = app.db.get('SELECT created_at FROM subscriptions WHERE subscriber_id=? AND list_id=?', six[0].id, L6).created_at;
+  assert.ok(joined > 0, 'מועד ההצטרפות לרשימה קיימת נשמר בעריכה');
+
+  const c6 = (await ok('POST', '/api/campaigns', {})).id;
+  const d6 = defaultDesign();
+  d6.blocks = [{ type: 'text', html: '<p>גר ב{{city}}.</p>' }, { type: 'text', html: '<p>רק ל-VIP</p>', onlyList: Lvip },
+    { type: 'text', html: '<p>לא ל-VIP</p>', onlyList: Lvip, notInList: true }, { type: 'poll', pid: 'poll01', question: 'איך היה?', options: ['טוב', 'רע'] }];
+  await ok('PUT', `/api/campaigns/${c6}`, { subject: 'נושא א', subjectB: 'נושא ב', preheader: '', fromName: 'נ', fromEmail: 'office@nekuda.test', replyTo: '', mode: 'blocks', design: d6, listIds: [L6] });
+  const up = await call('POST', `/api/campaigns/${c6}/attachments`, Buffer.from('%PDF-1.4 fake'), { rawBody: true, headers: { 'X-Filename': encodeURIComponent('תוכנית שנתית.pdf'), 'Content-Type': 'application/octet-stream' } });
+  assert.equal(up.status, 200, JSON.stringify(up.data));
+  assert.equal((await call('POST', `/api/campaigns/${c6}/attachments`, Buffer.from('MZ'), { rawBody: true, headers: { 'X-Filename': 'virus.exe', 'Content-Type': 'application/octet-stream' } })).status, 400);
+  assert.equal((await ok('POST', `/api/campaigns/${c6}/check`, {})).issues.filter((i) => /city/.test(i.text)).length, 0, 'שדה מותאם הוא תג מוכר');
+  const asVip = await ok('GET', `/api/campaigns/${c6}/preview?as=${six[0].email}`);
+  assert.ok(asVip.includes('גר בחיפה &lt;b&gt;.') && asVip.includes('רק ל-VIP') && !asVip.includes('לא ל-VIP'));
+  const from6 = received.length;
+  await ok('POST', `/api/campaigns/${c6}/send`, {});
+  await app.worker.tick();
+  const got6 = received.slice(from6);
+  assert.equal(got6.length, 4);
+  const mailTo = (addr) => got6.find((m) => m.to.includes(addr)).data;
+  const m1 = mailTo(six[0].email); const m2 = mailTo(six[1].email);
+  assert.ok(/Content-Type: multipart\/mixed/.test(m1) && m1.includes("filename*=UTF-8''" + encodeURIComponent('תוכנית שנתית.pdf')) && m1.includes(Buffer.from('%PDF-1.4 fake').toString('base64')));
+  const [t1, h1] = decodeParts(m1); const [t2, h2] = decodeParts(m2);
+  assert.ok(h1.includes('רק ל-VIP') && !h1.includes('לא ל-VIP') && t1.includes('רק ל-VIP') && !t1.includes('לא ל-VIP') && !t1.includes('nm-if'));
+  assert.ok(!h2.includes('רק ל-VIP') && h2.includes('לא ל-VIP') && !t2.includes('רק ל-VIP') && !h2.includes('nm-if'));
+  assert.ok(h1.includes('גר בחיפה &lt;b&gt;.') && h2.includes('גר ב.'));
+  const subj = (m) => Buffer.from(m.match(/Subject: =\?UTF-8\?B\?([^?]+)\?=/)[1], 'base64').toString('utf8');
+  assert.deepEqual(got6.map((m) => subj(m.data)).sort(), ['נושא א', 'נושא א', 'נושא ב', 'נושא ב']);
+  const pollLink = h1.match(/\/poll\/[\w.-]+\/poll01\/1/)[0];
+  assert.match(await ok('GET', pollLink), /תשובתך נרשמה/);
+  await ok('GET', pollLink.replace(/1$/, '0'));
+  assert.equal((await call('GET', pollLink.replace(/1$/, '7'))).status, 400);
+  const st6 = await ok('GET', `/api/campaigns/${c6}/stats`);
+  assert.deepEqual(st6.polls[0].options.map((o) => o.votes), [1, 0], 'הצבעה חוזרת מחליפה את הקודמת');
+  assert.deepEqual(st6.ab.map((v) => [v.subject, v.sent]), [['נושא א', 2], ['נושא ב', 2]]);
+
+  const cw = (await ok('POST', '/api/campaigns', {})).id;
+  await ok('PUT', `/api/campaigns/${cw}`, { subject: 'ברוך הבא {{first_name}}', preheader: '', fromName: 'נ', fromEmail: 'office@nekuda.test', replyTo: '', mode: 'blocks', design: defaultDesign(), listIds: [] });
+  const au = (await ok('POST', '/api/automations', { name: 'ברוך הבא', listId: L6, campaignId: cw, delayHours: 0 })).id;
+  assert.equal((await call('POST', '/api/automations', { name: 'כפול', listId: L6, campaignId: cw })).status, 409);
+  app.db.run('UPDATE automations SET created_at=created_at-5 WHERE id=?', au);
+  app.db.run('UPDATE subscriptions SET created_at=created_at-60 WHERE list_id=?', L6);
+  await ok('POST', `/api/automations/${au}/toggle`, { active: true });
+  assert.equal((await call('POST', `/api/campaigns/${cw}/send`, {})).status, 409);
+  const fromA = received.length;
+  await app.worker.tick();
+  assert.equal(received.length, fromA, 'מי שכבר היה ברשימה לא מקבל');
+  await ok('POST', '/api/import', { text: 'new@six.org,חדש בא', listIds: [L6], status: 'active' });
+  await app.worker.tick();
+  assert.equal(received.length, fromA + 1);
+  assert.ok(received.at(-1).to.includes('new@six.org') && subj(received.at(-1).data) === 'ברוך הבא חדש');
+  await app.worker.tick();
+  assert.equal(received.length, fromA + 1, 'לא נשלח פעמיים');
+  assert.equal(app.db.get('SELECT status FROM campaigns WHERE id=?', cw).status, 'sending', 'גליון אוטומציה נשאר פעיל');
+  const autos = await ok('GET', '/api/automations');
+  assert.deepEqual([autos[0].sent, autos[0].active], [1, true]);
+  await ok('POST', `/api/automations/${au}/toggle`, { active: false });
+  assert.equal(app.db.get('SELECT status FROM campaigns WHERE id=?', cw).status, 'paused');
+  assert.equal((await call('DELETE', `/api/campaigns/${cw}`)).status, 409);
+  await ok('DELETE', `/api/automations/${au}`);
+  assert.deepEqual(Object.values(app.db.get('SELECT status, auto FROM campaigns WHERE id=?', cw)), ['sent', 0]);
+  }
+  step('שדות מותאמים, קבצים מצורפים, בדיקת A/B, תנאי תצוגה, סקר ואוטומציות');
+
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
   smtp.close();
