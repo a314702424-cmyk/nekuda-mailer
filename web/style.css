@@ -114,3 +114,14 @@ button.small.primary{padding:4px 9px}
 .issues li.warn{background:#fdeed3;color:#5c3a00}
 .issues li.ok{background:#dff3e8;color:#0f5132}
 .savestate{font-size:13px;color:var(--muted)}
+
+/* גרסה 0.3.0 */
+.block>header{cursor:grab}
+.block.drop{outline:2px dashed var(--brand);outline-offset:2px}
+.grip{color:var(--muted);font-size:15px}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.tabs button.on{background:var(--brand);border-color:var(--brand);color:#fff}
+.perm-group{margin-top:12px}
+.perm-group>b{display:block;margin-bottom:4px}
+.google-btn{display:block;text-align:center;margin-top:12px}
+pre.code{direction:ltr;text-align:left;background:#f4f6fa;border:1px solid var(--line);border-radius:8px;padding:10px;overflow-x:auto;font-size:12px;white-space:pre-wrap}

@@ -149,6 +149,7 @@ export async function mountBuilder(container, design, opts) {
     check(b, 'hideDesktop', 'להסתיר במחשב', () => { if (b.hideDesktop) b.hideMobile = false; drawBlocks(); }));
 
   const list = h('div', { class: 'b-side' });
+  let dragFrom = null;
   function drawBlocks() {
     list.replaceChildren(...design.blocks.map((b, i) => {
       const move = (d) => { const j = i + d; if (j < 0 || j >= design.blocks.length) return; [design.blocks[i], design.blocks[j]] = [design.blocks[j], design.blocks[i]]; drawBlocks(); changed(); };
@@ -177,8 +178,19 @@ export async function mountBuilder(container, design, opts) {
         drawAll(); changed();
         notify('הבלוק נשמר');
       }) : null;
-      return h('section', { class: 'block' + (b.hideMobile || b.hideDesktop ? ' partial' : '') },
-        h('header', {}, h('b', {}, title), b.hideMobile ? h('span', { class: 'tag' }, 'מחשב בלבד') : null, b.hideDesktop ? h('span', { class: 'tag' }, 'נייד בלבד') : null,
+      return h('section', { class: 'block' + (b.hideMobile || b.hideDesktop ? ' partial' : ''),
+        ondragover: (e) => { if (dragFrom !== null && dragFrom !== i) { e.preventDefault(); e.currentTarget.classList.add('drop'); } },
+        ondragleave: (e) => e.currentTarget.classList.remove('drop'),
+        ondrop: (e) => {
+          e.preventDefault();
+          if (dragFrom === null || dragFrom === i) return;
+          const [moved] = design.blocks.splice(dragFrom, 1);
+          design.blocks.splice(i, 0, moved);
+          dragFrom = null;
+          drawBlocks(); changed();
+        } },
+        h('header', { draggable: true, title: 'גרור כדי לשנות מיקום', ondragstart: (e) => { dragFrom = i; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(i)); },
+          ondragend: () => { dragFrom = null; list.querySelectorAll('.drop').forEach((el) => el.classList.remove('drop')); } }, h('span', { class: 'grip' }, '⠿'), h('b', {}, title), b.hideMobile ? h('span', { class: 'tag' }, 'מחשב בלבד') : null, b.hideDesktop ? h('span', { class: 'tag' }, 'נייד בלבד') : null,
           tool('▲', 'העבר למעלה', () => move(-1)), tool('▼', 'העבר למטה', () => move(1)),
           tool('שכפל', 'שכפול הבלוק', () => { design.blocks.splice(i + 1, 0, clone(b)); drawBlocks(); changed(); }), saveBtn,
           tool('מחק', 'מחיקת הבלוק', () => { design.blocks.splice(i, 1); drawBlocks(); changed(); }, 'small danger')),
@@ -205,7 +217,7 @@ export async function mountBuilder(container, design, opts) {
 
   const palette = h('div', { class: 'card', style: 'margin:0' });
   function drawPalette() {
-    palette.replaceChildren(h('h2', {}, 'הוספת בלוק'), h('div', { class: 'palette' },
+    palette.replaceChildren(...[h('h2', {}, 'הוספת בלוק'), h('div', { class: 'palette' },
       Object.keys(BLOCK_DEFAULTS).map((t) => h('button', { type: 'button', onclick: () => {
         const b = BLOCK_DEFAULTS[t]();
         if (t === 'button') { delete b.bg; delete b.color; delete b.radius; }
@@ -220,7 +232,7 @@ export async function mountBuilder(container, design, opts) {
       h('button', { type: 'button', class: 'small danger', title: 'מחיקת הבלוק השמור', onclick: async () => {
         if (!window.confirm(`למחוק את הבלוק השמור "${sb.name}"?${sb.synced ? ' הוא ייעלם מכל הגליונות שמשתמשים בו.' : ''}`)) return;
         await store.remove(sb.id); saved = await store.list(); drawAll(); refresh();
-      } }, '✕'))))) : null);
+      } }, '✕'))))) : null].filter(Boolean));
   }
 
   const frame = h('iframe', { title: 'תצוגה מקדימה', sandbox: '' });
