@@ -1,0 +1,12 @@
+{
+  "name": "nekuda-mailer",
+  "version": "0.1.0",
+  "description": "מערכת דיוור עצמאית לנקודה: רשימות, בונה גליונות רספונסיבי, תור שליחה, מעקב וקפיצות",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "test": "node --disable-warning=ExperimentalWarning test/run.js"
+  }
+}

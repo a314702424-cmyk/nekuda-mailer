@@ -1,0 +1,21 @@
+# Blueprint ל-Render. יוצר שירות חדש בשם nekuda-mailer ואינו משנה שירותים קיימים.
+# שים לב: נדרש מסלול בתשלום (דיסק קבוע, ופורטי SMTP 465/587 חסומים במסלול החינמי). פורט 25 חסום תמיד.
+services:
+  - type: web
+    name: nekuda-mailer
+    runtime: node
+    plan: starter
+    buildCommand: "true"
+    startCommand: node --disable-warning=ExperimentalWarning server.js
+    healthCheckPath: /api/meta
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_DIR
+        value: /var/data
+      - key: NODE_VERSION
+        value: "22"
+    disk:
+      name: nekuda-mailer-data
+      mountPath: /var/data
+      sizeGB: 5
