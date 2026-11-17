@@ -462,6 +462,52 @@ try {
   } else assert.equal(pdfRes.status, 501);
   step('תור שליחה, נמענים לפי תגובה, פעולות מרוכזות, דף הרשמה ערוך, נגישות ו-PDF' + (meta3.pdf ? '' : ' (בלי Chrome)'));
 
+  // --- גרסה 0.4.0: אישור הרשמה במייל, עדכון הרשמה, ארכיון והיסטוריה ---
+  await ok('PUT', '/api/settings', { formDoubleOptIn: '1', archiveEnabled: '1', archiveTitle: 'כל הגליונות' });
+  const mailsBefore = received.length;
+  const pendRes = await fetch(base + '/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'email=opt@in.org&name=' + encodeURIComponent('דני') });
+  assert.match(await pendRes.text(), /כמעט סיימנו/);
+  const optRow = () => app.db.get("SELECT id, status FROM subscribers WHERE email='opt@in.org'");
+  assert.equal(optRow().status, 'pending');
+  assert.equal(received.length, mailsBefore + 1, 'נשלח מייל אישור');
+  const confirmMail = decodeParts(received.at(-1).data).join('\n');
+  const confirmLink = confirmMail.match(/\/confirm\/[\w.-]+/)[0];
+  assert.equal((await call('GET', '/confirm/0.zz.bad')).status, 400);
+  assert.equal((await call('GET', confirmLink)).status, 200);
+  assert.equal(optRow().status, 'active');
+  await ok('PUT', '/api/settings', { formDoubleOptIn: '0' });
+
+  const { makeToken } = await import('../src/track.js');
+  const prefTok = makeToken(app.db.setting('secret'), c2, optRow().id);
+  const twoLists = app.db.all('SELECT id FROM lists ORDER BY id LIMIT 2').map((l) => l.id);
+  for (const l of twoLists) app.db.run('INSERT OR IGNORE INTO subscriptions(subscriber_id, list_id, created_at) VALUES(?,?,0)', optRow().id, l);
+  const mine = () => app.db.all('SELECT list_id FROM subscriptions WHERE subscriber_id=? ORDER BY list_id', optRow().id).map((r) => r.list_id);
+  const listsBefore = mine();
+  assert.match(await ok('GET', '/p/' + prefTok), /עדכון ההרשמה/);
+  const keepId = listsBefore[0];
+  const prefPost = await fetch(`${base}/p/${prefTok}`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: `name=${encodeURIComponent('דני החדש')}&list=${keepId}&list=99999` });
+  assert.match(await prefPost.text(), /השינויים נשמרו/);
+  assert.deepEqual(mine(), [keepId], 'אפשר רק לעזוב רשימות, לא להצטרף');
+  assert.equal(app.db.get('SELECT name FROM subscribers WHERE id=?', optRow().id).name, 'דני החדש');
+  assert.equal((await call('GET', '/p/1.1.forged')).status, 400);
+
+  for (let i = 0; i < 8 && app.db.get('SELECT status FROM campaigns WHERE id=?', c2).status !== 'sent'; i++) { app.db.run('UPDATE deliveries SET next_try=0 WHERE campaign_id=?', c2); await app.worker.tick(); }
+  assert.equal(app.db.get('SELECT status FROM campaigns WHERE id=?', c2).status, 'sent');
+  assert.equal((await call('GET', `/archive/${c2}`)).status, 404, 'גליון שלא סומן לא מוצג');
+  await ok('POST', `/api/campaigns/${c2}/public`, { public: true });
+  assert.ok((await ok('GET', '/api/campaigns')).find((x) => x.id === c2).public);
+  const archList = await ok('GET', '/archive');
+  assert.ok(archList.includes('כל הגליונות') && archList.includes(`/archive/${c2}`));
+  const archOne = await ok('GET', `/archive/${c2}`);
+  assert.ok(archOne.includes('כותרת שעודכנה') && !archOne.includes('{{'));
+  await ok('PUT', '/api/settings', { archiveEnabled: '0' });
+  assert.equal((await call('GET', '/archive')).status, 404);
+
+  const someone = sentPeople.rows[0];
+  const hist = await ok('GET', `/api/subscribers/${someone.id}/history`);
+  assert.ok(hist.deliveries.length && hist.deliveries[0].subject && hist.subscriber.created_at);
+  step('אישור הרשמה במייל, דף עדכון ההרשמה, ארכיון ציבורי והיסטוריית נמען');
+
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
   smtp.close();
