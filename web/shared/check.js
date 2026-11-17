@@ -1,7 +1,7 @@
 // בדיקה לפני שליחה. משותף לשרת ולדפדפן.
 import { htmlToText } from './render.js';
 
-const KNOWN_TAGS = ['name', 'first_name', 'email', 'unsubscribe_url', 'webview_url', 'BASE', 'TOKEN'];
+const KNOWN_TAGS = ['name', 'first_name', 'email', 'unsubscribe_url', 'webview_url', 'preferences_url', 'BASE', 'TOKEN'];
 const GMAIL_CLIP = 102 * 1024;
 
 export function extractLinks(html) {
