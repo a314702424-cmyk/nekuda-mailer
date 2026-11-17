@@ -1,0 +1,19 @@
+[Unit]
+Description=nekuda-mailer
+After=network.target postfix.service
+
+[Service]
+User=nekuda
+WorkingDirectory=/opt/nekuda-mailer
+Environment=PORT=3080
+Environment=HOST=127.0.0.1
+Environment=DATA_DIR=/opt/nekuda-mailer/data
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
