@@ -4,7 +4,8 @@ import path from 'node:path';
 import { HttpError, json, html as sendHtml, clientIp, parseCookies } from './http.js';
 import { now, DEFAULT_SETTINGS } from './db.js';
 import { parseContacts, isEmail, csvCell } from './csv.js';
-import { defaultDesign, htmlToText } from '../web/shared/render.js';
+import { defaultDesign, letterDesign, htmlToText } from '../web/shared/render.js';
+import { checkEmail, extractLinks } from '../web/shared/check.js';
 import { campaignHtml, makeToken, personalize } from './track.js';
 import { enqueueCampaign, sentToday } from './worker.js';
 import { buildMessage, SmtpConnection, smtpOptions } from './mailer.js';
@@ -83,7 +84,7 @@ function recipientCount(db, campaignId) {
 function previewHtml(db, c, subscriber) {
   const settings = db.settings();
   const baseUrl = settings.baseUrl.replace(/\/+$/, '');
-  let h = campaignHtml(c);
+  let h = campaignHtml(c, db);
   if (!h.includes('{{unsubscribe_url}}')) {
     h += '<div style="padding:16px;font:13px Arial;color:#6b7280;text-align:center" dir="rtl"><a href="{{unsubscribe_url}}" style="color:#6b7280">להסרה מרשימת התפוצה</a></div>';
   }
@@ -294,6 +295,40 @@ export function registerApi(router, { db, worker, version }) {
     res.end();
   });
 
+  // ---------- ערכת מותג, בלוקים שמורים ----------
+  const brand = () => { try { return JSON.parse(db.setting('brand') || '{}') || {}; } catch { return {}; } };
+  const newDesign = (template) => {
+    const d = template === 'letter' ? letterDesign() : defaultDesign();
+    const b = brand();
+    if (template === 'letter') { delete b.bg; delete b.contentBg; }
+    d.settings = { ...d.settings, ...b, utm: '' };
+    return d;
+  };
+  api('GET', '/brand', ({ res }) => json(res, brand()));
+  api('PUT', '/brand', ({ res, body }) => {
+    const keep = ['width', 'bg', 'contentBg', 'font', 'fontSize', 'color', 'link', 'dir', 'mobileFontSize', 'btnBg', 'btnColor', 'btnRadius'];
+    const out = {};
+    for (const k of keep) if (body[k] !== undefined && body[k] !== null) out[k] = body[k];
+    db.setSetting('brand', JSON.stringify(out));
+    json(res, { ok: true });
+  });
+
+  const blockOut = (r) => { let block = null; try { block = JSON.parse(r.block); } catch { /* בלוק פגום */ } return { id: r.id, name: r.name, synced: !!r.synced, block, updatedAt: r.updated_at }; };
+  api('GET', '/blocks', ({ res }) => json(res, db.all('SELECT * FROM saved_blocks ORDER BY name').map(blockOut).filter((b) => b.block)));
+  api('POST', '/blocks', ({ res, body }) => {
+    need(str(body.name).trim(), 'חסר שם לבלוק');
+    need(body.block && typeof body.block === 'object' && body.block.type && body.block.type !== 'synced', 'הבלוק לא תקין');
+    const r = db.run('INSERT INTO saved_blocks(name, block, synced, updated_at) VALUES(?,?,?,?)', str(body.name, 100).trim(), JSON.stringify(body.block), body.synced ? 1 : 0, now());
+    json(res, { id: Number(r.lastInsertRowid) });
+  }, { bodyLimit: 1024 * 1024 });
+  api('PUT', '/blocks/:id', ({ res, body, params }) => {
+    need(body.block && typeof body.block === 'object' && body.block.type && body.block.type !== 'synced', 'הבלוק לא תקין');
+    const r = db.run('UPDATE saved_blocks SET block=?, name=COALESCE(?, name), updated_at=? WHERE id=?', JSON.stringify(body.block), body.name ? str(body.name, 100).trim() : null, now(), int(params.id));
+    need(r.changes, 'הבלוק לא נמצא', 404);
+    json(res, { ok: true });
+  }, { bodyLimit: 1024 * 1024 });
+  api('DELETE', '/blocks/:id', ({ res, params }) => { db.run('DELETE FROM saved_blocks WHERE id=?', int(params.id)); json(res, { ok: true }); });
+
   // ---------- גליונות ----------
   const getCampaign = (id) => { const c = db.get('SELECT * FROM campaigns WHERE id=?', int(id)); need(c, 'הגליון לא נמצא', 404); return c; };
 
@@ -303,7 +338,7 @@ export function registerApi(router, { db, worker, version }) {
     const t = now();
     const r = db.run(`INSERT INTO campaigns(subject, from_name, from_email, reply_to, mode, design, html, created_at, updated_at)
       VALUES(?,?,?,?,?,?,?,?,?)`, str(body.subject) || 'גליון חדש', s.fromName, s.fromEmail, s.replyTo,
-    body.mode === 'html' ? 'html' : 'blocks', JSON.stringify(defaultDesign()), '', t, t);
+    body.mode === 'html' ? 'html' : 'blocks', JSON.stringify(newDesign(body.template)), '', t, t);
     json(res, { id: Number(r.lastInsertRowid) });
   });
   api('GET', '/campaigns/:id', ({ res, params }) => json(res, campaignOut(db, getCampaign(params.id), true)));
@@ -316,6 +351,12 @@ export function registerApi(router, { db, worker, version }) {
       db.run(`UPDATE campaigns SET subject=?, preheader=?, from_name=?, from_email=?, reply_to=?, mode=?, design=?, html=?, updated_at=? WHERE id=?`,
         str(body.subject, 300), str(body.preheader, 300), str(body.fromName, 120), str(body.fromEmail, 254).trim(), str(body.replyTo, 254).trim(),
         body.mode === 'html' ? 'html' : 'blocks', JSON.stringify(body.design || defaultDesign()), String(body.html || '').slice(0, 2_000_000), now(), c.id);
+      const snap = JSON.stringify({ subject: str(body.subject, 300), preheader: str(body.preheader, 300), mode: body.mode === 'html' ? 'html' : 'blocks', design: body.design || defaultDesign(), html: String(body.html || '').slice(0, 2_000_000) });
+      const last = db.get('SELECT saved_at, snapshot FROM campaign_versions WHERE campaign_id=? ORDER BY id DESC LIMIT 1', c.id);
+      if ((!last || last.snapshot !== snap) && (body.snapshot || !last || now() - last.saved_at >= 600)) {
+        db.run('INSERT INTO campaign_versions(campaign_id, saved_at, snapshot) VALUES(?,?,?)', c.id, now(), snap);
+        db.run('DELETE FROM campaign_versions WHERE campaign_id=? AND id NOT IN (SELECT id FROM campaign_versions WHERE campaign_id=? ORDER BY id DESC LIMIT 15)', c.id, c.id);
+      }
       if (Array.isArray(body.listIds)) {
         db.run('DELETE FROM campaign_lists WHERE campaign_id=?', c.id);
         for (const l of body.listIds.map(Number).filter((n) => n > 0)) db.run('INSERT OR IGNORE INTO campaign_lists(campaign_id, list_id) VALUES(?,?)', c.id, l);
@@ -342,14 +383,68 @@ export function registerApi(router, { db, worker, version }) {
       db.run('DELETE FROM links WHERE campaign_id=?', c.id);
       db.run('DELETE FROM deliveries WHERE campaign_id=?', c.id);
       db.run('DELETE FROM campaign_lists WHERE campaign_id=?', c.id);
+      db.run('DELETE FROM campaign_versions WHERE campaign_id=?', c.id);
       db.run('DELETE FROM campaigns WHERE id=?', c.id);
     });
     json(res, { ok: true });
   });
 
-  api('GET', '/campaigns/:id/preview', ({ res, params, user }) => {
+  api('GET', '/campaigns/:id/preview', ({ res, params, user, query }) => {
     const c = getCampaign(params.id);
-    sendHtml(res, previewHtml(db, c, { id: 0, email: 'name@example.com', name: user.username }).html);
+    const as = str(query.get('as'), 254).trim();
+    let who = { id: 0, email: 'name@example.com', name: user.username };
+    if (as) {
+      who = db.get('SELECT id, email, name FROM subscribers WHERE email=?', as);
+      need(who, 'לא נמצא נמען עם הכתובת הזו', 404);
+    }
+    sendHtml(res, previewHtml(db, c, who).html);
+  });
+
+  api('GET', '/campaigns/:id/versions', ({ res, params }) => {
+    const c = getCampaign(params.id);
+    json(res, db.all('SELECT id, saved_at, snapshot FROM campaign_versions WHERE campaign_id=? ORDER BY id DESC', c.id).map((v) => {
+      let subject = ''; try { subject = JSON.parse(v.snapshot).subject; } catch { /* גרסה פגומה */ }
+      return { id: v.id, savedAt: v.saved_at, subject };
+    }));
+  });
+  api('POST', '/campaigns/:id/versions/:vid/restore', ({ res, params }) => {
+    const c = getCampaign(params.id);
+    need(['draft', 'scheduled', 'paused'].includes(c.status), 'אי אפשר לשחזר גליון שנשלח', 409);
+    const v = db.get('SELECT snapshot FROM campaign_versions WHERE id=? AND campaign_id=?', int(params.vid), c.id);
+    need(v, 'הגרסה לא נמצאה', 404);
+    const s = JSON.parse(v.snapshot);
+    db.run('UPDATE campaigns SET subject=?, preheader=?, mode=?, design=?, html=?, updated_at=? WHERE id=?',
+      s.subject, s.preheader, s.mode, JSON.stringify(s.design), s.html, now(), c.id);
+    json(res, { ok: true });
+  });
+
+  const isPrivateHost = (h) => /^(localhost|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1|\[?f[cd])/i.test(h);
+  api('POST', '/campaigns/:id/check', async ({ res, params, body }) => {
+    const c = getCampaign(params.id);
+    const settings = db.settings();
+    const html = campaignHtml(c, db);
+    const out = checkEmail({
+      subject: c.subject, preheader: c.preheader, html, fromEmail: c.from_email || settings.fromEmail,
+      hasLists: !!db.get('SELECT 1 x FROM campaign_lists WHERE campaign_id=?', c.id),
+    });
+    if (body.links) {
+      const baseHost = (() => { try { return new URL(settings.baseUrl).host; } catch { return ''; } })();
+      const links = extractLinks(html).slice(0, 40);
+      const results = await Promise.all(links.map(async (url) => {
+        try {
+          const u = new URL(url);
+          if (isPrivateHost(u.hostname) && u.host !== baseHost) return null;
+          const r = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(7000), headers: { 'User-Agent': 'Mozilla/5.0 (nekuda-mailer link check)' } });
+          await r.body?.cancel();
+          return r.status >= 400 ? { level: r.status === 404 || r.status === 410 ? 'error' : 'warn', text: `הקישור מחזיר שגיאה ${r.status}: ${url}` } : null;
+        } catch {
+          return { level: 'warn', text: `לא הצלחתי לפתוח את הקישור: ${url}` };
+        }
+      }));
+      out.issues.push(...results.filter(Boolean));
+      out.stats.linksChecked = links.length;
+    }
+    json(res, out);
   });
   api('GET', '/campaigns/:id/recipients', ({ res, params }) => json(res, recipientCount(db, getCampaign(params.id).id)));
 

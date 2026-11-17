@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS links(
   UNIQUE(campaign_id, url));
 CREATE TABLE IF NOT EXISTS link_clicks(
   link_id INTEGER NOT NULL, subscriber_id INTEGER NOT NULL, PRIMARY KEY(link_id, subscriber_id)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS saved_blocks(
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, block TEXT NOT NULL, synced INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS campaign_versions(
+  id INTEGER PRIMARY KEY, campaign_id INTEGER NOT NULL, saved_at INTEGER NOT NULL, snapshot TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS campaign_versions_c ON campaign_versions(campaign_id, id);
 CREATE TABLE IF NOT EXISTS bounces(
   id INTEGER PRIMARY KEY, subscriber_id INTEGER, campaign_id INTEGER, type TEXT NOT NULL, detail TEXT,
   created_at INTEGER NOT NULL);

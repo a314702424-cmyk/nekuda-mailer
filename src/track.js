@@ -18,23 +18,44 @@ export function readToken(secret, token) {
 const DEFAULT_FOOTER = (address) => `<div style="padding:16px;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.6;color:#6b7280;text-align:center;" dir="rtl">${address ? esc(address) + '<br>' : ''}<a href="{{unsubscribe_url}}" style="color:#6b7280;">להסרה מרשימת התפוצה</a></div>`;
 
 /** מקבל גליון, מחזיר HTML גולמי (לפני מעקב והתאמה אישית). */
-export function campaignHtml(c) {
+export function syncedBlocks(db) {
+  const map = {};
+  for (const r of db.all('SELECT id, block FROM saved_blocks WHERE synced=1')) {
+    try { map[r.id] = JSON.parse(r.block); } catch { /* מדלגים על בלוק פגום */ }
+  }
+  return map;
+}
+
+function designOf(c) {
+  try { return JSON.parse(c.design || 'null'); } catch { return null; } // עיצוב פגום: נשתמש בברירת מחדל
+}
+
+export function campaignHtml(c, db) {
   if (c.mode === 'html') return c.html || '';
-  let design = null;
-  try { design = JSON.parse(c.design || 'null'); } catch { /* עיצוב פגום, נשתמש בברירת מחדל */ }
-  return renderDesign(design, { subject: c.subject, preheader: c.preheader });
+  return renderDesign(designOf(c), { subject: c.subject, preheader: c.preheader, synced: db ? syncedBlocks(db) : null });
+}
+
+/** מוסיף פרמטרי UTM לקישור חיצוני, אם הוגדר שם קמפיין ואין בו כבר UTM. */
+export function withUtm(url, utm, baseUrl) {
+  if (!utm || /[?&]utm_source=/i.test(url) || (baseUrl && url.startsWith(baseUrl))) return url;
+  const i = url.indexOf('#');
+  const head = i >= 0 ? url.slice(0, i) : url;
+  const hash = i >= 0 ? url.slice(i) : '';
+  return `${head}${head.includes('?') ? '&' : '?'}utm_source=newsletter&utm_medium=email&utm_campaign=${encodeURIComponent(utm)}${hash}`;
 }
 
 /** מכין תבנית לשליחה: מוסיף קישור הסרה אם חסר, ומחליף קישורים בקישורי מעקב. */
 export function prepareCampaign(db, c) {
-  let html = campaignHtml(c);
+  let html = campaignHtml(c, db);
+  const utm = String(designOf(c)?.settings?.utm || '').trim();
+  const baseUrl = db.setting('baseUrl').replace(/\/+$/, '');
   if (!html.includes('{{unsubscribe_url}}')) {
     const footer = DEFAULT_FOOTER(db.setting('companyAddress'));
     html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, footer + '</body>') : html + footer;
   }
   const text = htmlToText(html);
   const tracked = html.replace(/(<a\s[^>]*?href\s*=\s*")(https?:\/\/[^"]+)(")/gi, (m, pre, url, post) => {
-    const clean = url.replace(/&amp;/g, '&');
+    const clean = withUtm(url.replace(/&amp;/g, '&'), utm, baseUrl);
     db.run('INSERT OR IGNORE INTO links(campaign_id, url) VALUES(?,?)', c.id, clean);
     const id = db.get('SELECT id FROM links WHERE campaign_id=? AND url=?', c.id, clean).id;
     return `${pre}{{BASE}}/c/{{TOKEN}}/${id}${post}`;
