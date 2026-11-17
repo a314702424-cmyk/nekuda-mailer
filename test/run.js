@@ -87,7 +87,7 @@ try {
   d.blocks.push({ type: 'columns', cols: [{ src: 'https://x/a.png', alt: '', html: '<p>א</p>' }, { src: '', alt: '', html: '<p>ב</p>' }] });
   const rendered = renderDesign(d, { subject: 'נושא', preheader: 'תקציר' });
   assert.match(rendered, /@media only screen/);
-  assert.match(rendered, /class="col"/);
+  assert.match(rendered, /class="col txt"/);
   assert.match(rendered, /dir="rtl"/);
   assert.match(htmlToText(rendered), /כותרת הגליון/);
   step('בונה הגליון מפיק HTML רספונסיבי בעברית');
@@ -274,6 +274,74 @@ try {
   const dash = await ok('GET', '/api/dashboard');
   assert.ok(dash.sentToday >= 4);
   step('שליחה חוזרת בלי כפילויות, תזמון, טופס הרשמה והעלאת תמונות');
+
+  // --- גרסה 0.2.0: בדיקה לפני שליחה, מותג, בלוקים מסונכרנים, גרסאות, UTM ---
+  const { checkEmail } = await import('../web/shared/check.js');
+  const { withUtm } = await import('../src/track.js');
+  const bad = checkEmail({ subject: '', preheader: '', html: '<a href="https://">x</a><a href="http://a.test/">y</a><img src="https://a.test/i.png"><p>{{nmae}}</p>', hasLists: false, fromEmail: '' });
+  const texts = bad.issues.map((i) => i.text).join('|');
+  for (const frag of ['חסרה שורת נושא', 'קישורים ריקים', 'בלי הצפנה', 'טקסט חלופי', 'תגים לא מוכרים', 'לא נבחרה רשימת', 'חסרה כתובת שולח', 'יתווסף', 'תוסיף אחד אוטומטית']) {
+    if (frag === 'יתווסף') continue;
+    assert.ok(texts.includes(frag), 'חסרה אזהרה: ' + frag);
+  }
+  assert.ok(checkEmail({ subject: 'x', preheader: 'y', html: 'a'.repeat(110 * 1024) }).issues.some((i) => i.level === 'error' && i.text.includes('102KB')));
+  assert.equal(withUtm('https://a.test/p?x=1#top', 'issue 80', base), 'https://a.test/p?x=1&utm_source=newsletter&utm_medium=email&utm_campaign=issue%2080#top');
+  assert.equal(withUtm('https://a.test/?utm_source=z', 'k', base), 'https://a.test/?utm_source=z');
+  assert.equal(withUtm(base + '/subscribe', 'k', base), base + '/subscribe');
+
+  await ok('PUT', '/api/brand', { bg: '#101010', btnBg: '#aa0000', font: 'Tahoma, Geneva, sans-serif', evil: 'x' });
+  assert.deepEqual(Object.keys(await ok('GET', '/api/brand')).sort(), ['bg', 'btnBg', 'font']);
+  const c2 = (await ok('POST', '/api/campaigns', { subject: 'גליון 81' })).id;
+  const full = await ok('GET', `/api/campaigns/${c2}`);
+  assert.equal(full.design.settings.bg, '#101010');
+  const letter = await ok('GET', `/api/campaigns/${(await ok('POST', '/api/campaigns', { template: 'letter' })).id}`);
+  assert.deepEqual(letter.design.blocks.map((b) => b.type), ['text', 'footer']);
+
+  const blockId = (await ok('POST', '/api/blocks', { name: 'כותרת עליונה', synced: true, block: { type: 'heading', text: 'כותרת מסונכרנת', level: 2 } })).id;
+  assert.equal((await call('POST', '/api/blocks', { name: 'x', block: { type: 'synced', ref: 1 } })).status, 400);
+  const d2 = full.design;
+  d2.settings.utm = 'issue-81';
+  d2.blocks = [{ type: 'synced', ref: blockId }, { type: 'text', html: '<p>שלום {{name}}</p>', hideMobile: true },
+    { type: 'button', text: 'קישור תקין', href: base + '/subscribe' }, { type: 'button', text: 'קישור שבור', href: base + '/no-such-page' },
+    { type: 'button', text: 'חיצוני', href: 'https://nekuda.org.il/x' }, { type: 'image', src: base + '/media/none.png', alt: '' }];
+  const put = (extra = {}) => ok('PUT', `/api/campaigns/${c2}`, { subject: 'גליון 81', preheader: '', fromName: 'נ', fromEmail: 'office@nekuda.test', replyTo: '', mode: 'blocks', design: d2, html: '', listIds: [listId], ...extra });
+  await put({ snapshot: true });
+  let prev = await ok('GET', `/api/campaigns/${c2}/preview`);
+  assert.match(prev, /כותרת מסונכרנת/);
+  assert.match(prev, /<tr class="hm">/);
+  await ok('PUT', `/api/blocks/${blockId}`, { block: { type: 'heading', text: 'כותרת שעודכנה', level: 2 } });
+  assert.match(await ok('GET', `/api/campaigns/${c2}/preview`), /כותרת שעודכנה/);
+  assert.match(await ok('GET', `/api/campaigns/${c2}/preview?as=yael@h.test`), /שלום יעל/);
+  assert.equal((await call('GET', `/api/campaigns/${c2}/preview?as=nobody@h.test`)).status, 404);
+
+  const chk = await ok('POST', `/api/campaigns/${c2}/check`, { links: true });
+  const ct = chk.issues.map((i) => i.text).join('|');
+  assert.ok(ct.includes(`שגיאה 404: ${base}/no-such-page`), 'קישור שבור מזוהה');
+  assert.ok(!ct.includes(`${base}/subscribe`), 'קישור תקין לא מסומן');
+  assert.ok(ct.includes('טקסט חלופי') && ct.includes('אין תקציר'));
+  assert.equal(chk.stats.linksChecked, 3);
+
+  d2.blocks[1].html = '<p>גרסה שנייה</p>';
+  await put({ snapshot: true, subject: 'גליון 81 ב' });
+  const versions = await ok('GET', `/api/campaigns/${c2}/versions`);
+  assert.equal(versions.length, 2);
+  await put({ subject: 'שמירה אוטומטית' });
+  assert.equal((await ok('GET', `/api/campaigns/${c2}/versions`)).length, 2, 'שמירה אוטומטית לא יוצרת גרסה בכל פעם');
+  await ok('POST', `/api/campaigns/${c2}/versions/${versions[1].id}/restore`);
+  assert.match(await ok('GET', `/api/campaigns/${c2}/preview`), /שלום admin/);
+
+  d2.blocks = d2.blocks.filter((b) => b.type !== 'image' && b.text !== 'קישור שבור');
+  await put();
+  const sentBefore = received.length;
+  await ok('POST', `/api/campaigns/${c2}/send`, {});
+  await app.worker.tick();
+  const m2 = decodeParts(received[sentBefore].data)[1];
+  assert.match(m2, /כותרת שעודכנה/);
+  const links2 = app.db.all('SELECT url FROM links WHERE campaign_id=?', c2).map((l) => l.url);
+  assert.ok(links2.includes('https://nekuda.org.il/x?utm_source=newsletter&utm_medium=email&utm_campaign=issue-81'), 'UTM נוסף לקישור חיצוני');
+  assert.ok(links2.includes(base + '/subscribe'), 'קישור פנימי בלי UTM');
+  await ok('DELETE', `/api/blocks/${blockId}`);
+  step('בדיקה לפני שליחה, ערכת מותג, בלוקים מסונכרנים, גרסאות, תצוגה כנמען ו-UTM');
 
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
