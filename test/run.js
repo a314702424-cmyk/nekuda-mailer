@@ -508,6 +508,23 @@ try {
   assert.ok(hist.deliveries.length && hist.deliveries[0].subject && hist.subscriber.created_at);
   step('אישור הרשמה במייל, דף עדכון ההרשמה, ארכיון ציבורי והיסטוריית נמען');
 
+  // --- גרסה 0.5.0: שדרוג העורך ---
+  const d5 = defaultDesign();
+  d5.settings.font = "'Heebo', Arial, sans-serif"; d5.settings.headingFont = "'Suez One', Georgia, serif";
+  d5.blocks = [{ type: 'heading', text: 'כ', level: 1, size: 40, blockBg: '#fff0f0' }, { type: 'text', html: '<p>ט</p>', blockBg: 'javascript:1' },
+    { type: 'button', text: 'לחץ', href: 'https://x.org', size: 'l', full: true }, { type: 'button', text: 'קטן', href: 'https://x.org', size: 's' }];
+  const r5 = renderDesign(d5, {});
+  assert.ok(r5.includes('family=Heebo:wght@400;700&family=Suez+One') && r5.indexOf('fonts.googleapis.com') < r5.indexOf('<style>'), 'קישור לגופני רשת בראש המייל');
+  assert.ok(r5.includes("font-family:'Suez One', Georgia, serif;font-size:40px") && r5.includes('bgcolor="#fff0f0"') && !r5.includes('javascript'));
+  assert.ok(r5.includes('padding:16px 36px') && r5.includes('width="100%" style="width:100%;"') && r5.includes('padding:8px 18px'));
+  assert.ok(!r5.includes('data-b='), 'סימוני עריכה לא נכנסים למייל');
+  const e5 = renderDesign(d5, { editor: true });
+  assert.ok(e5.includes('<tr data-b="0"') && e5.includes('<tr data-b="3"') && e5.indexOf('fonts.googleapis.com') > e5.indexOf('<body'));
+  assert.ok(!renderDesign(defaultDesign(), {}).includes('fonts.googleapis.com'), 'בלי גופן רשת אין טעינה חיצונית');
+  d5.settings.font = 'Comic Sans; } body { display:none';
+  assert.ok(!renderDesign(d5, {}).includes('Comic Sans'), 'גופן לא מוכר נדחה');
+  step('עורך: גופני רשת, גופן כותרות, גדלי כפתור, רקע לבלוק וסימוני עריכה');
+
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
   smtp.close();
