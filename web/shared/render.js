@@ -17,6 +17,7 @@ export function defaultDesign() {
     settings: {
       width: 600, bg: '#eef0f4', contentBg: '#ffffff', font: FONTS[0][0], fontSize: 17,
       color: '#1a1a1a', link: '#1b4fd8', dir: 'rtl',
+      mobileFontSize: 0, btnBg: '#1b4fd8', btnColor: '#ffffff', btnRadius: 6, utm: '',
     },
     blocks: [
       { type: 'heading', text: 'כותרת הגליון', level: 1, align: 'center' },
@@ -27,6 +28,22 @@ export function defaultDesign() {
   };
 }
 
+/** תבנית "מכתב אישי": טקסט פשוט בלי עיצוב כבד. */
+export function letterDesign() {
+  const d = defaultDesign();
+  d.settings.bg = '#ffffff';
+  d.blocks = [
+    { type: 'text', html: '<p>שלום {{first_name}},</p><p>כאן כותבים את המכתב, בשפה פשוטה ואישית.</p><p>בברכה,<br>נקודה הוצאה לאור</p>', align: 'right' },
+    { type: 'footer', html: '<p><a href="{{unsubscribe_url}}">להסרה מרשימת התפוצה</a></p>' },
+  ];
+  return d;
+}
+
+export const youtubeThumb = (url) => {
+  const m = /(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([\w-]{6,})/.exec(String(url || ''));
+  return m ? `https://img.youtube.com/vi/${m[1]}/hqdefault.jpg` : '';
+};
+
 export const BLOCK_DEFAULTS = {
   heading: () => ({ type: 'heading', text: 'כותרת', level: 2, align: 'right' }),
   text: () => ({ type: 'text', html: '<p>טקסט</p>', align: 'right' }),
@@ -35,6 +52,10 @@ export const BLOCK_DEFAULTS = {
   columns: () => ({ type: 'columns', cols: [{ src: '', alt: '', html: '<p>טור ימני</p>' }, { src: '', alt: '', html: '<p>טור שמאלי</p>' }] }),
   divider: () => ({ type: 'divider', color: '#d9dce3' }),
   spacer: () => ({ type: 'spacer', height: 24 }),
+  social: () => ({ type: 'social', align: 'center', links: [{ label: 'האתר שלנו', href: 'https://' }, { label: 'פייסבוק', href: '' }, { label: 'וואטסאפ', href: '' }] }),
+  menu: () => ({ type: 'menu', align: 'center', links: [{ label: 'דף הבית', href: 'https://' }, { label: 'צור קשר', href: 'https://' }] }),
+  video: () => ({ type: 'video', url: '', thumb: '', caption: 'לצפייה בסרטון' }),
+  html: () => ({ type: 'html', html: '<p>קוד HTML חופשי</p>' }),
   footer: () => ({ type: 'footer', html: '<p><a href="{{unsubscribe_url}}">להסרה מרשימת התפוצה</a></p>' }),
 };
 
@@ -63,7 +84,7 @@ function renderBlock(b, s) {
       return `<tr><td class="pad${level === 1 ? ' h1' : ''}" align="${alignOf(b.align)}" style="${pad}${base}font-size:${size}px;line-height:1.3;font-weight:bold;text-align:${alignOf(b.align)};color:${color(b.color, s.color)};">${esc(b.text)}</td></tr>`;
     }
     case 'text':
-      return `<tr><td class="pad" align="${alignOf(b.align)}" style="${pad}${base}font-size:${s.fontSize}px;line-height:1.6;text-align:${alignOf(b.align)};">${inlineRich(b.html, s)}</td></tr>`;
+      return `<tr><td class="pad txt" align="${alignOf(b.align)}" style="${pad}${base}font-size:${s.fontSize}px;line-height:1.6;text-align:${alignOf(b.align)};">${inlineRich(b.html, s)}</td></tr>`;
     case 'image': {
       if (!b.src) return '';
       const pct = num(b.widthPct, 100, 10, 100);
@@ -76,18 +97,19 @@ function renderBlock(b, s) {
       return `<tr><td class="${b.fullBleed ? '' : 'pad'}" align="${al}" style="${b.fullBleed ? 'padding:0;' : pad}">${cell}</td></tr>`;
     }
     case 'button': {
-      const bg = color(b.bg, '#1b4fd8');
-      const r = num(b.radius, 6, 0, 40);
+      const bg = color(b.bg, s.btnBg);
+      const r = num(b.radius, s.btnRadius, 0, 40);
       const al = alignOf(b.align, 'center');
-      return `<tr><td class="pad" align="${al}" style="${pad}"><table role="presentation" cellpadding="0" cellspacing="0" border="0" align="${al}"><tr><td bgcolor="${bg}" style="background:${bg};border-radius:${r}px;"><a href="${esc(b.href)}" target="_blank" style="display:inline-block;padding:12px 28px;font-family:${s.font};font-size:${s.fontSize}px;font-weight:bold;color:${color(b.color, '#ffffff')};text-decoration:none;border-radius:${r}px;">${esc(b.text)}</a></td></tr></table></td></tr>`;
+      return `<tr><td class="pad" align="${al}" style="${pad}"><table role="presentation" cellpadding="0" cellspacing="0" border="0" align="${al}"><tr><td bgcolor="${bg}" style="background:${bg};border-radius:${r}px;"><a href="${esc(b.href)}" target="_blank" style="display:inline-block;padding:12px 28px;font-family:${s.font};font-size:${s.fontSize}px;font-weight:bold;color:${color(b.color, s.btnColor)};text-decoration:none;border-radius:${r}px;">${esc(b.text)}</a></td></tr></table></td></tr>`;
     }
     case 'columns': {
       const colW = Math.floor((s.width - 48) / 2) - 12;
-      const cells = (b.cols || []).slice(0, 2).map((c) => {
+      const cells = (b.cols || []).slice(0, 2).map((c, i) => {
         const img = c.src ? `<div style="margin:0 0 10px 0;">${imgTag(c.src, c.alt, colW, 100)}</div>` : '';
-        return `<td class="col" width="50%" valign="top" style="width:50%;padding:0 6px 12px 6px;${base}font-size:${s.fontSize}px;line-height:1.6;text-align:right;">${img}${inlineRich(c.html, s)}</td>`;
+        const cls = b.reverseMobile ? (i === 0 ? 'colA' : 'colB') : 'col';
+        return `<td class="${cls} txt" width="50%" valign="top" style="width:50%;padding:0 6px 12px 6px;${base}font-size:${s.fontSize}px;line-height:1.6;text-align:right;">${img}${inlineRich(c.html, s)}</td>`;
       }).join('');
-      return `<tr><td class="pad" style="padding:14px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" dir="${s.dir}"><tr>${cells}</tr></table></td></tr>`;
+      return `<tr><td class="pad" style="padding:14px 18px;"><table role="presentation" class="${b.reverseMobile ? 'revt' : ''}" width="100%" cellpadding="0" cellspacing="0" border="0" dir="${s.dir}"><tr>${cells}</tr></table></td></tr>`;
     }
     case 'divider':
       return `<tr><td class="pad" style="padding:8px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="border-top:1px solid ${color(b.color, '#d9dce3')};font-size:0;line-height:0;">&nbsp;</td></tr></table></td></tr>`;
@@ -95,6 +117,28 @@ function renderBlock(b, s) {
       const hgt = num(b.height, 24, 4, 200);
       return `<tr><td style="height:${hgt}px;font-size:0;line-height:${hgt}px;">&nbsp;</td></tr>`;
     }
+    case 'social': {
+      const links = (b.links || []).filter((l) => l.href && l.href !== 'https://' && l.label);
+      if (!links.length) return '';
+      const al = alignOf(b.align, 'center');
+      return `<tr><td class="pad" align="${al}" style="${pad}text-align:${al};">${links.map((l) => `<a href="${esc(l.href)}" target="_blank" style="display:inline-block;margin:0 3px 6px 3px;padding:7px 16px;border:1px solid ${s.link};border-radius:99px;font-family:${s.font};font-size:14px;color:${s.link};text-decoration:none;">${esc(l.label)}</a>`).join('')}</td></tr>`;
+    }
+    case 'menu': {
+      const links = (b.links || []).filter((l) => l.href && l.href !== 'https://' && l.label);
+      if (!links.length) return '';
+      const al = alignOf(b.align, 'center');
+      return `<tr><td class="pad" align="${al}" style="padding:10px 24px;${base}font-size:15px;font-weight:bold;text-align:${al};">${links.map((l) => `<a href="${esc(l.href)}" target="_blank" style="color:${s.link};text-decoration:none;">${esc(l.label)}</a>`).join(' &nbsp;·&nbsp; ')}</td></tr>`;
+    }
+    case 'video': {
+      if (!b.url) return '';
+      const thumb = b.thumb || youtubeThumb(b.url);
+      const px = s.width - 48;
+      const cap = `<a href="${esc(b.url)}" target="_blank" style="font-family:${s.font};font-size:${s.fontSize}px;font-weight:bold;color:${s.link};text-decoration:none;">&#9654; ${esc(b.caption || 'לצפייה בסרטון')}</a>`;
+      const pic = thumb ? `<a href="${esc(b.url)}" target="_blank" style="text-decoration:none;">${imgTag(thumb, b.caption || 'סרטון', px, 100)}</a><div style="height:10px;line-height:10px;font-size:0;">&nbsp;</div>` : '';
+      return `<tr><td class="pad" align="center" style="${pad}text-align:center;">${pic}${cap}</td></tr>`;
+    }
+    case 'html':
+      return `<tr><td class="pad txt" style="${pad}${base}font-size:${s.fontSize}px;line-height:1.6;">${b.html || ''}</td></tr>`;
     case 'footer':
       return `<tr><td class="pad" align="center" style="${pad}font-family:${s.font};font-size:13px;line-height:1.6;color:#6b7280;text-align:center;">${inlineRich(b.html, { ...s, link: '#6b7280' })}</td></tr>`;
     default:
@@ -102,7 +146,17 @@ function renderBlock(b, s) {
   }
 }
 
-export function renderDesign(design, { subject = '', preheader = '' } = {}) {
+function renderOne(b, s, synced, depth = 0) {
+  if (!b) return '';
+  if (b.type === 'synced') return depth > 2 ? '' : renderOne(synced && synced[b.ref], s, synced, depth + 1);
+  const row = renderBlock(b, s);
+  if (!row) return '';
+  if (b.hideMobile) return row.replace(/^<tr/, '<tr class="hm"');
+  if (b.hideDesktop) return row.replace(/^<tr/, '<tr class="hd" style="display:none;mso-hide:all;"');
+  return row;
+}
+
+export function renderDesign(design, { subject = '', preheader = '', synced = null } = {}) {
   const d = design && design.settings ? design : defaultDesign();
   const s = { ...defaultDesign().settings, ...d.settings };
   s.width = num(s.width, 600, 320, 800);
@@ -110,9 +164,12 @@ export function renderDesign(design, { subject = '', preheader = '' } = {}) {
   s.bg = color(s.bg, '#eef0f4'); s.contentBg = color(s.contentBg, '#ffffff');
   s.color = color(s.color, '#1a1a1a'); s.link = color(s.link, '#1b4fd8');
   s.dir = s.dir === 'ltr' ? 'ltr' : 'rtl';
-  const rows = (d.blocks || []).map((b) => renderBlock(b, s)).join('\n');
+  s.btnBg = color(s.btnBg, '#1b4fd8'); s.btnColor = color(s.btnColor, '#ffffff'); s.btnRadius = num(s.btnRadius, 6, 0, 40);
+  const mfs = num(s.mobileFontSize, 0, 0, 30);
+  const rows = (d.blocks || []).map((b) => renderOne(b, s, synced)).join('\n');
+  // הריפוד אחרי התקציר מונע מתוכנת הדואר למשוך טקסט מגוף המייל לשורת התצוגה המקדימה
   const pre = preheader
-    ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;font-size:1px;line-height:1px;color:${s.bg};">${esc(preheader)}</div>` : '';
+    ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;font-size:1px;line-height:1px;color:${s.bg};">${esc(preheader)}${'&#847;&zwnj;&nbsp;'.repeat(70)}</div>` : '';
   return `<!DOCTYPE html>
 <html lang="${s.dir === 'rtl' ? 'he' : 'en'}" dir="${s.dir}">
 <head>
@@ -129,6 +186,11 @@ img{border:0;}
   .col{display:block !important;width:100% !important;box-sizing:border-box;}
   .pad{padding-left:16px !important;padding-right:16px !important;}
   .h1{font-size:25px !important;}
+  .hm{display:none !important;}
+  .hd{display:table-row !important;}
+  .revt{display:table !important;width:100% !important;}
+  .colA{display:table-footer-group !important;width:100% !important;}
+  .colB{display:table-header-group !important;width:100% !important;}${mfs ? `\n  .txt{font-size:${mfs}px !important;}` : ''}
 }
 </style>
 </head>
