@@ -74,6 +74,7 @@ export function personalize(tpl, { baseUrl, token, subscriber, isHtml }) {
     email: subscriber.email || '',
     unsubscribe_url: `${baseUrl}/u/${token}`,
     webview_url: `${baseUrl}/v/${token}`,
+    preferences_url: `${baseUrl}/p/${token}`,
   };
   return String(tpl || '').replace(/\{\{(\w+)\}\}/g, (m, k) => {
     if (!(k in vars)) return '';

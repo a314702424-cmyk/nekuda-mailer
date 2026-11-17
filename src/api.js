@@ -14,7 +14,7 @@ import { htmlToPdf, chromePath } from './pdf.js';
 
 const SESSION_DAYS = 30;
 const COOKIE = 'nm_sess';
-const STATUSES = ['active', 'unsubscribed', 'bounced', 'blocked'];
+const STATUSES = ['active', 'pending', 'unsubscribed', 'bounced', 'blocked'];
 const loginFails = new Map();
 
 function hashPassword(password) {
@@ -68,7 +68,7 @@ function campaignOut(db, c, full = false) {
     replyTo: c.reply_to, mode: c.mode, status: c.status, scheduledAt: c.scheduled_at, startedAt: c.started_at,
     finishedAt: c.finished_at, createdAt: c.created_at, updatedAt: c.updated_at,
     listIds: db.all('SELECT list_id FROM campaign_lists WHERE campaign_id=?', c.id).map((r) => r.list_id),
-    stats: campaignStats(db, c.id),
+    stats: campaignStats(db, c.id), public: !!c.public,
   };
   if (full) {
     out.html = c.html || '';
@@ -357,6 +357,18 @@ export function registerApi(router, { db, worker, version }) {
   };
   api('POST', '/subscribers', ({ res, body }) => json(res, { id: saveSubscriber(0, body) }));
   api('PUT', '/subscribers/:id', ({ res, body, params }) => json(res, { id: saveSubscriber(int(params.id), body) }));
+  api('GET', '/subscribers/:id/history', ({ res, params }) => {
+    const id = int(params.id);
+    const s = db.get('SELECT created_at, source, consent_note, unsubscribed_at, last_open_at, last_click_at FROM subscribers WHERE id=?', id);
+    need(s, 'הנמען לא נמצא', 404);
+    json(res, {
+      subscriber: s,
+      deliveries: db.all(`SELECT c.id, c.subject, d.status, d.sent_at, d.opened_at, d.opens, d.clicked_at, d.clicks, d.unsubscribed_at, d.error
+        FROM deliveries d JOIN campaigns c ON c.id=d.campaign_id WHERE d.subscriber_id=? ORDER BY COALESCE(d.sent_at, 0) DESC, c.id DESC LIMIT 100`, id),
+      bounces: db.all('SELECT type, detail, created_at FROM bounces WHERE subscriber_id=? ORDER BY id DESC LIMIT 30', id),
+    });
+  });
+
   api('DELETE', '/subscribers/:id', ({ res, params }) => {
     const id = int(params.id);
     db.tx(() => {
@@ -620,14 +632,24 @@ export function registerApi(router, { db, worker, version }) {
 
   api('GET', '/campaigns/:id/stats', ({ res, params }) => {
     const c = getCampaign(params.id);
+    const t0 = c.started_at || 0;
+    const series = (col) => (t0 ? db.all(`SELECT (${col} - ?) / 3600 h, COUNT(*) n FROM deliveries WHERE campaign_id=? AND ${col} IS NOT NULL AND ${col} >= ? AND ${col} < ? GROUP BY h`, t0, c.id, t0, t0 + 72 * 3600) : [])
+      .map((r) => ({ h: Number(r.h), n: Number(r.n) }));
     json(res, {
       campaign: campaignOut(db, c),
+      timeline: { opens: series('opened_at'), clicks: series('clicked_at') },
       links: db.all(`SELECT l.id, l.url, l.clicks, (SELECT COUNT(*) FROM link_clicks lc WHERE lc.link_id=l.id) uniq
         FROM links l WHERE l.campaign_id=? ORDER BY l.clicks DESC`, c.id).map((l) => ({ ...l, uniq: Number(l.uniq) })),
       bounces: db.all('SELECT type, COUNT(*) n FROM bounces WHERE campaign_id=? GROUP BY type', c.id).map((b) => ({ type: b.type, n: Number(b.n) })),
       errors: db.all("SELECT error, COUNT(*) n FROM deliveries WHERE campaign_id=? AND status IN ('failed','bounced') AND error IS NOT NULL GROUP BY error ORDER BY n DESC LIMIT 10", c.id)
         .map((e) => ({ error: e.error, n: Number(e.n) })),
     });
+  });
+
+  api('POST', '/campaigns/:id/public', ({ res, params, body }) => {
+    const c = getCampaign(params.id);
+    db.run('UPDATE campaigns SET public=? WHERE id=?', body.public ? 1 : 0, c.id);
+    json(res, { ok: true });
   });
 
   const PEOPLE = {
@@ -689,7 +711,7 @@ export function registerApi(router, { db, worker, version }) {
         if (k === 'smtpPass' && !body.smtpPass && !body.clearSmtpPass) continue;
         if (k === 'googleClientSecret' && !body.googleClientSecret && !body.clearGoogleSecret) continue;
         if (k === 'formColor' && !/^#[0-9a-f]{6}$/i.test(body[k])) continue;
-        db.setSetting(k, k === 'baseUrl' ? String(body[k]).replace(/\/+$/, '') : str(body[k], k === 'formIntro' ? 2000 : 500).trim());
+        db.setSetting(k, k === 'baseUrl' ? String(body[k]).replace(/\/+$/, '') : str(body[k], k === 'formIntro' || k === 'confirmText' ? 2000 : 500).trim());
       }
     });
     json(res, { ok: true });

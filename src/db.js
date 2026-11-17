@@ -78,6 +78,12 @@ export const DEFAULT_SETTINGS = {
   formColor: '#1b4fd8',
   formLogo: '',
   formAskName: '1',
+  formDoubleOptIn: '0',
+  confirmSubject: 'נא לאשר את ההרשמה לרשימת התפוצה',
+  confirmText: 'קיבלנו בקשה לצרף את הכתובת הזו לרשימת התפוצה שלנו. כדי להשלים את ההרשמה יש ללחוץ על הכפתור. אם לא ביקשת להירשם, אפשר להתעלם מהמייל הזה.',
+  formPending: 'כמעט סיימנו. שלחנו אליך מייל עם קישור לאישור ההרשמה.',
+  archiveEnabled: '0',
+  archiveTitle: 'ארכיון הגליונות',
   googleClientId: '',
   googleClientSecret: '',
 };
@@ -90,6 +96,10 @@ export function openDb(dataDir) {
   raw.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;');
   raw.exec(SCHEMA);
   // שדרוג מגרסאות קודמות: עמודות המשתמשים שנוספו ב-0.3.0. משתמשים קיימים נשארים מנהלים.
+  // 0.4.0: גליון שמוצג בארכיון הציבורי
+  if (!raw.prepare('PRAGMA table_info(campaigns)').all().some((c) => c.name === 'public')) {
+    raw.exec('ALTER TABLE campaigns ADD COLUMN public INTEGER NOT NULL DEFAULT 0');
+  }
   if (!raw.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'role')) {
     raw.exec(`ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT '';
       ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';
