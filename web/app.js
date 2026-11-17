@@ -124,12 +124,23 @@ async function dashboardPage() {
 // ---------- גליונות ----------
 async function campaignsPage() {
   const rows = await api('GET', '/campaigns');
-  const create = (mode) => safe(async () => { const r = await api('POST', '/campaigns', { mode }); location.hash = `#/campaign/${r.id}`; });
+  const create = (mode, template) => safe(async () => { const r = await api('POST', '/campaigns', { mode, template }); location.hash = `#/campaign/${r.id}`; });
   shell([
     h('div', { class: 'bar' }, h('h1', {}, 'גליונות'),
-      h('button', { onclick: create('html') }, 'גליון מ-HTML מוכן'), h('button', { class: 'primary', onclick: create('blocks') }, 'גליון חדש')),
+      h('button', { onclick: create('html') }, 'גליון מ-HTML מוכן'), h('button', { title: 'טקסט פשוט בלי עיצוב כבד', onclick: create('blocks', 'letter') }, 'מכתב אישי'),
+      h('button', { class: 'primary', onclick: create('blocks') }, 'גליון חדש')),
     campaignTable(rows),
   ]);
+}
+
+function issueList(result) {
+  const order = { error: 0, warn: 1, info: 2 };
+  const items = [...result.issues].sort((x, y) => order[x.level] - order[y.level]);
+  const kb = Math.round(result.stats.bytes / 1024);
+  return h('div', {},
+    h('p', { class: 'muted' }, `משקל: ${kb}KB · קישורים: ${result.stats.links} · תמונות: ${result.stats.images}`),
+    items.length ? h('ul', { class: 'issues' }, items.map((i) => h('li', { class: i.level }, (i.level === 'error' ? 'לתקן: ' : i.level === 'warn' ? 'לשים לב: ' : '') + i.text)))
+      : h('ul', { class: 'issues' }, h('li', { class: 'ok' }, 'לא נמצאו בעיות.')));
 }
 
 async function campaignPage(id) {
@@ -141,34 +152,69 @@ async function campaignPage(id) {
   const fromName = text(c.fromName);
   const fromEmail = h('input', { type: 'email', value: c.fromEmail, class: 'ltr' });
   const replyTo = h('input', { type: 'email', value: c.replyTo, class: 'ltr' });
+  const utm = text(design.settings.utm || '', { class: 'ltr', placeholder: 'למשל issue-80. ריק = בלי UTM' });
   const lists = listChecks(c.listIds);
   const htmlArea = h('textarea', { class: 'code', value: c.html, placeholder: 'הדבק כאן את ה-HTML המלא של הגליון' });
+  const saveState = h('span', { class: 'savestate' });
   let mode = c.mode;
   let builder = null;
   let dirty = false;
+  let saving = false;
   const body = h('div');
+  const here = location.hash;
+  const touch = () => { dirty = true; saveState.textContent = 'יש שינויים שלא נשמרו'; };
 
-  const payload = () => ({ subject: subject.value, preheader: preheader.value, fromName: fromName.value, fromEmail: fromEmail.value,
-    replyTo: replyTo.value, listIds: lists.values(), mode, design, html: htmlArea.value });
-  const save = async (quiet) => { await api('PUT', `/campaigns/${id}`, payload()); dirty = false; if (!quiet) toast('הגליון נשמר'); };
+  const payload = () => {
+    design.settings.utm = utm.value.trim();
+    return { subject: subject.value, preheader: preheader.value, fromName: fromName.value, fromEmail: fromEmail.value,
+      replyTo: replyTo.value, listIds: lists.values(), mode, design, html: htmlArea.value };
+  };
+  const save = async (quiet, snapshot = false) => {
+    if (saving) return;
+    saving = true;
+    try {
+      await api('PUT', `/campaigns/${id}`, { ...payload(), snapshot });
+      dirty = false;
+      saveState.textContent = `נשמר ב-${new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })}`;
+      if (!quiet) toast('הגליון נשמר');
+    } finally { saving = false; }
+  };
+  // שמירה אוטומטית כל 20 שניות, כל עוד נמצאים במסך הזה
+  const auto = setInterval(() => {
+    if (location.hash !== here || !document.body.contains(body)) { clearInterval(auto); return; }
+    if (dirty && !saving) save(true).catch(() => { saveState.textContent = 'השמירה האוטומטית נכשלה'; });
+  }, 20000);
+
   const upload = safe(async (file) => (await api('POST', '/upload', file, { raw: true, headers: { 'X-Filename': encodeURIComponent(file.name), 'Content-Type': 'application/octet-stream' } })).url);
+  const store = {
+    list: () => api('GET', '/blocks'),
+    save: safe((name, block, synced) => api('POST', '/blocks', { name, block, synced })),
+    update: safe((bid, block) => api('PUT', `/blocks/${bid}`, { block })),
+    remove: safe((bid) => api('DELETE', `/blocks/${bid}`)),
+  };
 
-  function drawBody() {
+  async function drawBody() {
     if (mode === 'blocks') {
-      builder = mountBuilder(body, design, { upload, meta: () => ({ subject: subject.value, preheader: preheader.value }), onChange: () => { dirty = true; } });
+      builder = await mountBuilder(body, design, {
+        upload, blocks: store, notify: toast, onChange: touch,
+        meta: () => ({ subject: subject.value, preheader: preheader.value }),
+        saveBrand: safe((settings) => api('PUT', '/brand', settings)),
+      });
     } else {
       const frame = h('iframe', { title: 'תצוגה מקדימה', sandbox: '' });
       const wrap = h('div', { class: 'preview-frame' }, frame);
       const show = () => { frame.srcdoc = htmlArea.value.replace(/\{\{(name|first_name)\}\}/g, 'ישראל ישראלי').replace(/\{\{\w+\}\}/g, '#'); };
-      htmlArea.oninput = () => { dirty = true; clearTimeout(show.t); show.t = setTimeout(show, 300); };
+      htmlArea.oninput = () => { touch(); clearTimeout(show.t); show.t = setTimeout(show, 300); };
       body.replaceChildren(h('div', { class: 'builder' },
         h('div', {}, h('p', { class: 'muted' }, 'תגים זמינים: {{name}}, {{first_name}}, {{email}}, {{unsubscribe_url}}, {{webview_url}}. אם אין קישור הסרה, המערכת מוסיפה אחד אוטומטית.'), htmlArea),
         h('div', { class: 'preview-wrap' }, h('div', { class: 'row', style: 'margin-bottom:8px' }, h('b', { class: 'grow' }, 'תצוגה מקדימה'),
-          h('button', { class: 'small', onclick: () => wrap.classList.remove('mobile') }, 'מחשב'), h('button', { class: 'small', onclick: () => wrap.classList.add('mobile') }, 'נייד')), wrap)));
+          h('button', { class: 'small', onclick: () => wrap.classList.remove('mobile') }, 'מחשב'), h('button', { class: 'small', onclick: () => wrap.classList.add('mobile') }, 'נייד'),
+          h('button', { class: 'small', onclick: () => wrap.classList.toggle('dark') }, 'מצב כהה')), wrap)));
       show();
     }
   }
-  [subject, preheader].forEach((el) => el.addEventListener('input', () => { dirty = true; builder?.refresh(); }));
+  [subject, preheader].forEach((el) => el.addEventListener('input', () => { touch(); builder?.refresh(); }));
+  [fromName, fromEmail, replyTo, utm].forEach((el) => el.addEventListener('input', touch));
 
   const sendTest = safe(async () => {
     const emails = text('', { class: 'ltr', placeholder: 'name@example.com' });
@@ -183,34 +229,70 @@ async function campaignPage(id) {
       }) }, 'שלח בדיקה')]);
   });
 
-  const sendDialog = safe(async () => {
+  const fullPreview = safe(async () => {
     await save(true);
-    const rc = await api('GET', `/campaigns/${id}/recipients`);
-    const when = h('input', { type: 'datetime-local' });
-    dialog('שליחת הגליון', h('div', {},
-      h('p', {}, `הגליון יישלח ל-${fmt(rc.fresh)} נמענים פעילים.`, rc.already ? ` (${fmt(rc.already)} כבר קיבלו או נמצאים בתור ולא יקבלו שוב.)` : ''),
-      field('תזמון (להשאיר ריק לשליחה מיידית)', when)), (close) => [
+    const as = text('', { class: 'ltr', placeholder: 'ריק = נמען לדוגמה' });
+    dialog('תצוגה מלאה', field('להציג כפי שיראה נמען מסוים (כתובת מייל מהרשימה)', as), (close) => [
       h('button', { onclick: close }, 'ביטול'),
-      h('button', { class: 'primary', disabled: !rc.fresh, onclick: safe(async () => {
-        const at = when.value ? Math.floor(new Date(when.value).getTime() / 1000) : 0;
-        const r = await api('POST', `/campaigns/${id}/send`, { scheduledAt: at });
-        toast(r.scheduled ? `הגליון תוזמן ל-${date(r.scheduled)}` : `${fmt(r.queued)} הודעות נכנסו לתור`);
-        close();
-        location.hash = `#/stats/${id}`;
-      }) }, 'אישור שליחה')]);
+      h('button', { class: 'primary', onclick: () => { window.open(`/api/campaigns/${id}/preview${as.value.trim() ? '?as=' + encodeURIComponent(as.value.trim()) : ''}`, '_blank'); close(); } }, 'פתח בלשונית חדשה')]);
   });
 
-  const modeBtn = h('button', { onclick: () => {
+  const runCheck = safe(async () => {
+    await save(true);
+    const box = h('div', {}, h('p', { class: 'muted' }, 'בודק, כולל פתיחה של כל קישור…'));
+    dialog('בדיקה לפני שליחה', box, (close) => [h('button', { class: 'primary', onclick: close }, 'סגירה')]);
+    const r = await api('POST', `/campaigns/${id}/check`, { links: true });
+    box.replaceChildren(issueList(r));
+  });
+
+  const versions = safe(async () => {
+    const rows = await api('GET', `/campaigns/${id}/versions`);
+    dialog('גרסאות קודמות', rows.length ? h('table', { class: 'data' }, rows.map((v) => h('tr', {},
+      h('td', { class: 'num' }, date(v.savedAt)), h('td', {}, v.subject || '(ללא נושא)'),
+      h('td', {}, h('button', { class: 'small', onclick: safe(async () => {
+        if (!window.confirm('לשחזר את הגרסה הזו? התוכן הנוכחי יוחלף (הוא נשמר כגרסה לפני כן).')) return;
+        await save(true, true);
+        await api('POST', `/campaigns/${id}/versions/${v.id}/restore`, {});
+        document.querySelector('dialog')?.close();
+        clearInterval(auto);
+        route();
+      }) }, 'שחזור'))))) : h('p', { class: 'muted' }, 'עדיין אין גרסאות שמורות. גרסה נשמרת בכל לחיצה על "שמירה", ובשמירה אוטומטית אחת לעשר דקות.'),
+    (close) => [h('button', { onclick: close }, 'סגירה')]);
+  });
+
+  const sendDialog = safe(async () => {
+    await save(true, true);
+    const [rc, chk] = await Promise.all([api('GET', `/campaigns/${id}/recipients`), api('POST', `/campaigns/${id}/check`, { links: true })]);
+    const errors = chk.issues.filter((i) => i.level === 'error').length;
+    const when = h('input', { type: 'datetime-local' });
+    const force = h('input', { type: 'checkbox' });
+    const go = h('button', { class: 'primary', disabled: !rc.fresh || errors > 0, onclick: safe(async () => {
+      const at = when.value ? Math.floor(new Date(when.value).getTime() / 1000) : 0;
+      const r = await api('POST', `/campaigns/${id}/send`, { scheduledAt: at });
+      toast(r.scheduled ? `הגליון תוזמן ל-${date(r.scheduled)}` : `${fmt(r.queued)} הודעות נכנסו לתור`);
+      document.querySelector('dialog')?.close();
+      clearInterval(auto);
+      location.hash = `#/stats/${id}`;
+    }) }, 'אישור שליחה');
+    force.onchange = () => { go.disabled = !rc.fresh || (errors > 0 && !force.checked); };
+    dialog('שליחת הגליון', h('div', {},
+      h('p', {}, `הגליון יישלח ל-${fmt(rc.fresh)} נמענים פעילים.`, rc.already ? ` (${fmt(rc.already)} כבר קיבלו או נמצאים בתור ולא יקבלו שוב.)` : ''),
+      issueList(chk),
+      errors ? h('label', { class: 'inline-check', style: 'margin-top:8px' }, force, 'לשלוח למרות הבעיות שסומנו "לתקן"') : null,
+      field('תזמון (להשאיר ריק לשליחה מיידית)', when)), (close) => [h('button', { onclick: close }, 'ביטול'), go]);
+  });
+
+  const modeBtn = h('button', { onclick: async () => {
     if (mode === 'blocks' && !window.confirm('לעבור לעריכת HTML? העיצוב בבלוקים יישמר, אבל הגליון יישלח לפי ה-HTML.')) return;
-    mode = mode === 'blocks' ? 'html' : 'blocks'; dirty = true; builder = null;
+    mode = mode === 'blocks' ? 'html' : 'blocks'; touch(); builder = null;
     modeBtn.textContent = mode === 'blocks' ? 'מעבר ל-HTML מוכן' : 'מעבר לבונה הבלוקים';
-    drawBody();
+    await drawBody();
   } }, mode === 'blocks' ? 'מעבר ל-HTML מוכן' : 'מעבר לבונה הבלוקים');
 
   shell([
-    h('div', { class: 'bar' }, h('h1', {}, 'עריכת גליון'), tag(CAMP_STATUS, c.status), modeBtn,
-      h('a', { class: 'btn', href: `/api/campaigns/${id}/preview`, target: '_blank', onclick: async (e) => { if (dirty) { e.preventDefault(); await safe(save)(true); window.open(`/api/campaigns/${id}/preview`, '_blank'); } } }, 'תצוגה מלאה'),
-      h('button', { onclick: sendTest }, 'שליחת בדיקה'), h('button', { onclick: safe(() => save()) }, 'שמירה'),
+    h('div', { class: 'bar' }, h('h1', {}, 'עריכת גליון'), saveState, tag(CAMP_STATUS, c.status), modeBtn,
+      h('button', { onclick: versions }, 'גרסאות'), h('button', { onclick: fullPreview }, 'תצוגה מלאה'), h('button', { onclick: runCheck }, 'בדיקה'),
+      h('button', { onclick: sendTest }, 'שליחת בדיקה'), h('button', { onclick: safe(() => save(false, true)) }, 'שמירה'),
       c.status === 'scheduled'
         ? h('button', { class: 'danger', onclick: safe(async () => { await api('POST', `/campaigns/${id}/unschedule`, {}); route(); }) }, 'ביטול תזמון')
         : c.status === 'paused'
@@ -219,12 +301,13 @@ async function campaignPage(id) {
     c.status === 'scheduled' ? h('div', { class: 'notice' }, `הגליון מתוזמן ל-${date(c.scheduledAt)}. שינויים שתשמור עד אז ייכנסו לשליחה.`) : null,
     h('div', { class: 'card' },
       h('div', { class: 'row' }, h('div', { class: 'grow' }, field('נושא', subject)), h('div', { class: 'grow' }, field('תקציר', preheader))),
-      h('div', { class: 'row' }, h('div', { class: 'grow' }, field('שם השולח', fromName)), h('div', { class: 'grow' }, field('כתובת השולח', fromEmail)), h('div', { class: 'grow' }, field('כתובת לתשובה', replyTo))),
+      h('div', { class: 'row' }, h('div', { class: 'grow' }, field('שם השולח', fromName)), h('div', { class: 'grow' }, field('כתובת השולח', fromEmail)), h('div', { class: 'grow' }, field('כתובת לתשובה', replyTo)),
+        h('div', { class: 'grow' }, field('שם קמפיין ל-UTM', utm))),
       h('label', {}, 'רשימות תפוצה'), lists),
     body,
   ]);
-  lists.addEventListener('change', () => { dirty = true; });
-  drawBody();
+  lists.addEventListener('change', touch);
+  await drawBody();
 }
 
 async function statsPage(id) {
