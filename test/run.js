@@ -120,7 +120,7 @@ try {
   cookie = '';
   assert.equal((await call('POST', '/api/login', { username: 'admin', password: 'wrong-password-1' })).status, 401);
   await ok('POST', '/api/login', { username: 'admin', password: 'correct-horse-battery' });
-  assert.equal((await ok('GET', '/api/meta')).user, 'admin');
+  assert.equal((await ok('GET', '/api/meta')).user.name, 'admin');
   const noCsrf = await fetch(base + '/api/lists', { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{"name":"x"}' });
   assert.equal(noCsrf.status, 403);
   step('הקמה, התחברות והגנות גישה');
@@ -342,6 +342,125 @@ try {
   assert.ok(links2.includes(base + '/subscribe'), 'קישור פנימי בלי UTM');
   await ok('DELETE', `/api/blocks/${blockId}`);
   step('בדיקה לפני שליחה, ערכת מותג, בלוקים מסונכרנים, גרסאות, תצוגה כנמען ו-UTM');
+
+  // --- גרסה 0.3.0: משתמשים והרשאות ---
+  const adminCookie = cookie;
+  const meta3 = await ok('GET', '/api/meta');
+  assert.deepEqual([meta3.user.name, meta3.user.role, meta3.google], ['admin', 'admin', false]);
+  assert.ok(meta3.user.perms.includes('users.manage'));
+  const editorId = (await ok('POST', '/api/users', { username: 'editor', email: 'Editor@Gmail.com', password: 'editor-pass-123', role: 'user', perms: ['campaigns.view', 'subscribers.view', 'bogus'] })).id;
+  assert.equal((await call('POST', '/api/users', { username: 'editor', password: 'another-pass-1' })).status, 409);
+  assert.equal((await call('POST', '/api/users', { username: 'nobody' })).status, 400, 'משתמש בלי סיסמה ובלי מייל');
+  const meId = meta3.user.id;
+  assert.equal((await call('PUT', `/api/users/${meId}`, { username: 'admin', role: 'user', perms: [] })).status, 409, 'אי אפשר להוריד את המנהל האחרון');
+  assert.equal((await call('DELETE', `/api/users/${meId}`)).status, 409);
+  cookie = '';
+  await ok('POST', '/api/login', { username: 'editor', password: 'editor-pass-123' });
+  const editorCookie = cookie;
+  const em = (await ok('GET', '/api/meta')).user;
+  assert.deepEqual([em.name, em.role, em.perms], ['editor', 'user', ['campaigns.view', 'subscribers.view']]);
+  await ok('GET', '/api/campaigns');
+  await ok('GET', '/api/subscribers');
+  await ok('GET', '/api/dashboard');
+  for (const [m, u, b] of [['POST', '/api/campaigns', {}], ['GET', '/api/users'], ['GET', '/api/settings'], ['GET', '/api/lists'], ['GET', '/api/export'],
+    ['POST', `/api/campaigns/${c2}/send`, {}], ['GET', `/api/campaigns/${c2}/stats`], ['DELETE', `/api/campaigns/${c2}`], ['POST', '/api/subscribers/bulk', { all: true, action: 'delete' }], ['POST', '/api/import', { text: 'q@q.com' }]]) {
+    assert.equal((await call(m, u, b)).status, 403, `${m} ${u} חסום למשתמש בלי הרשאה`);
+  }
+  cookie = adminCookie;
+  await ok('PUT', `/api/users/${editorId}`, { username: 'editor', email: 'editor@gmail.com', role: 'user', perms: ['campaigns.view'], active: false });
+  cookie = editorCookie;
+  assert.equal((await call('GET', '/api/campaigns')).status, 401, 'משתמש מושבת מנותק');
+  assert.equal((await call('POST', '/api/login', { username: 'editor', password: 'editor-pass-123' })).status, 401);
+  cookie = adminCookie;
+  await ok('PUT', `/api/users/${editorId}`, { username: 'editor', email: 'editor@gmail.com', role: 'user', perms: ['campaigns.view'], active: true });
+  step('משתמשים, הרשאות לפי פעולה, השבתה והגנה על המנהל האחרון');
+
+  // --- כניסה עם Google מול ספק מדומה ---
+  const http = await import('node:http');
+  let tokenClaims = {};
+  const fakeGoogle = http.createServer((req, res) => {
+    const part = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ id_token: `${part({ alg: 'none' })}.${part(tokenClaims)}.x` }));
+  });
+  const gPort = await listen(fakeGoogle);
+  process.env.GOOGLE_TOKEN_URL = `http://127.0.0.1:${gPort}/token`;
+  try {
+    cookie = '';
+    assert.equal((await call('GET', '/auth/google')).status, 404, 'כבוי עד שמגדירים');
+    cookie = adminCookie;
+    await ok('PUT', '/api/settings', { googleClientId: 'cid-1', googleClientSecret: 'secret-1' });
+    const st = await ok('GET', '/api/settings');
+    assert.deepEqual([st.googleClientSecret, st.hasGoogleSecret], ['', true], 'הסוד לא נחשף');
+    cookie = '';
+    assert.equal((await ok('GET', '/api/meta')).google, true);
+    const go = async (claims) => {
+      cookie = '';
+      const start = await call('GET', '/auth/google');
+      assert.equal(start.status, 302);
+      const loc = new URL(start.headers.get('location'));
+      assert.equal(loc.searchParams.get('redirect_uri'), base + '/auth/google/callback');
+      tokenClaims = { iss: 'https://accounts.google.com', aud: 'cid-1', exp: Math.floor(Date.now() / 1000) + 300, email_verified: true, ...claims };
+      return call('GET', `/auth/google/callback?code=abc&state=${loc.searchParams.get('state')}`);
+    };
+    assert.equal((await go({ email: 'stranger@gmail.com' })).status, 403, 'חשבון שלא הוגדר נדחה');
+    assert.equal((await go({ email: 'editor@gmail.com', aud: 'other' })).status, 403, 'אסימון של אפליקציה אחרת נדחה');
+    assert.equal((await go({ email: 'editor@gmail.com', email_verified: false })).status, 403);
+    cookie = '';
+    assert.equal((await call('GET', '/auth/google/callback?code=abc&state=forged')).status, 400, 'בלי state תואם');
+    assert.equal((await go({ email: 'EDITOR@gmail.com' })).status, 302);
+    assert.equal((await ok('GET', '/api/meta')).user.name, 'editor');
+  } finally {
+    delete process.env.GOOGLE_TOKEN_URL;
+    fakeGoogle.close();
+  }
+  cookie = adminCookie;
+  step('כניסה עם Google: רק למשתמשים שהוגדרו, עם בדיקת state ואסימון');
+
+  // --- תור, נמענים לפי תגובה, פעולות מרוכזות, דף הרשמה ו-PDF ---
+  const queue = await ok('GET', '/api/queue');
+  assert.ok(Array.isArray(queue.campaigns) && typeof queue.sentToday === 'number');
+  const sentPeople = await ok('GET', `/api/campaigns/${c2}/people?kind=sent`);
+  assert.ok(sentPeople.total > 0 && sentPeople.rows[0].email);
+  assert.equal((await ok('GET', `/api/campaigns/${c2}/people?kind=clicked`)).total, 0);
+  const csv3 = await ok('GET', `/api/campaigns/${c2}/people.csv?kind=sent`);
+  assert.ok(csv3.includes('email,name,status') && csv3.includes(sentPeople.rows[0].email));
+
+  const bulkList = (await ok('POST', '/api/lists', { name: 'רשימה לפעולה מרוכזת' })).id;
+  assert.equal((await call('POST', '/api/subscribers/bulk', { action: 'delete' })).status, 400, 'בלי סינון ובלי אישור מפורש');
+  const dry = await ok('POST', '/api/subscribers/bulk', { filter: { status: 'active' }, dryRun: true });
+  assert.ok(dry.count > 0);
+  await ok('POST', '/api/subscribers/bulk', { filter: { status: 'active' }, action: 'addToList', listId: bulkList });
+  assert.equal(Number(app.db.get('SELECT COUNT(*) n FROM subscriptions WHERE list_id=?', bulkList).n), dry.count);
+  await ok('POST', '/api/subscribers/bulk', { filter: { list: bulkList }, action: 'removeFromList', listId: bulkList });
+  assert.equal(Number(app.db.get('SELECT COUNT(*) n FROM subscriptions WHERE list_id=?', bulkList).n), 0);
+  const subsBefore = Number(app.db.get('SELECT COUNT(*) n FROM subscribers').n);
+  await ok('POST', '/api/import', { text: 'bulk1@del.com\nbulk2@del.com', listIds: [bulkList], status: 'active' });
+  assert.equal((await ok('POST', '/api/subscribers/bulk', { filter: { list: bulkList }, action: 'delete' })).count, 2);
+  assert.equal(Number(app.db.get('SELECT COUNT(*) n FROM subscribers').n), subsBefore);
+
+  await ok('PUT', '/api/settings', { formTitle: 'הצטרפו לגליון <נקודה>', formIntro: 'שורה א\nשורה ב', formButton: 'אני בפנים', formSuccess: 'נרשמת בהצלחה', formColor: '#aa0000', formAskName: '0', formListId: String(bulkList) });
+  const formHtml = await ok('GET', '/subscribe');
+  assert.ok(formHtml.includes('הצטרפו לגליון &lt;נקודה&gt;') && formHtml.includes('שורה א<br>שורה ב') && formHtml.includes('אני בפנים') && formHtml.includes('#aa0000'));
+  assert.ok(!formHtml.includes('name="name"'), 'שדה השם הוסתר');
+  const posted = await fetch(base + '/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'email=form3@new.org' });
+  assert.match(await posted.text(), /נרשמת בהצלחה/);
+  assert.ok(app.db.get("SELECT 1 x FROM subscribers s JOIN subscriptions sp ON sp.subscriber_id=s.id WHERE s.email='form3@new.org' AND sp.list_id=?", bulkList));
+
+  const nl = (await ok('POST', '/api/campaigns', { template: 'newsletter' })).id;
+  assert.match(await ok('GET', `/api/campaigns/${nl}/preview`), /דבר המערכת/);
+  const low = (await ok('GET', `/api/campaigns/${nl}`)).design;
+  low.settings.color = '#cccccc'; low.settings.contentBg = '#ffffff'; low.settings.fontSize = 11;
+  await ok('PUT', `/api/campaigns/${nl}`, { design: low, subject: 'בדיקת נגישות' });
+  const acc = (await ok('POST', `/api/campaigns/${nl}/check`, {})).issues.map((i) => i.text).join('|');
+  assert.ok(/ניגודיות/.test(acc) && /11px/.test(acc), 'בדיקות נגישות: ' + acc);
+
+  const pdfRes = await fetch(`${base}/api/campaigns/${c2}/pdf`, { headers: { Cookie: cookie } });
+  if (meta3.pdf) {
+    assert.equal(pdfRes.status, 200);
+    assert.equal(Buffer.from(await pdfRes.arrayBuffer()).subarray(0, 5).toString(), '%PDF-');
+  } else assert.equal(pdfRes.status, 501);
+  step('תור שליחה, נמענים לפי תגובה, פעולות מרוכזות, דף הרשמה ערוך, נגישות ו-PDF' + (meta3.pdf ? '' : ' (בלי Chrome)'));
 
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
