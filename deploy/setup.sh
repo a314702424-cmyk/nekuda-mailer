@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # התקנה על Ubuntu 24.04 נקי. להריץ כ-root מתוך תיקיית הפרויקט:
 #   SITE_HOST=diur.example.org MAIL_HOST=mta.example.org SIGN_DOMAIN=example.org bash deploy/setup.sh
-# הסקריפט לא נבדק עדיין על שרת אמיתי. הוא בטוח להרצה חוזרת.
+# הורץ בהצלחה על Ubuntu 24.04 (DigitalOcean). בטוח להרצה חוזרת.
 set -euo pipefail
 
 SITE_HOST="${SITE_HOST:?חסר SITE_HOST (תת-הדומיין של האתר)}"
