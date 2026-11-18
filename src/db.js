@@ -79,6 +79,8 @@ export const DEFAULT_SETTINGS = {
   formLogo: '',
   formAskName: '1',
   customFields: '',
+  aiKey: '',
+  aiModel: '',
   formDoubleOptIn: '0',
   confirmSubject: 'נא לאשר את ההרשמה לרשימת התפוצה',
   confirmText: 'קיבלנו בקשה לצרף את הכתובת הזו לרשימת התפוצה שלנו. כדי להשלים את ההרשמה יש ללחוץ על הכפתור. אם לא ביקשת להירשם, אפשר להתעלם מהמייל הזה.',
