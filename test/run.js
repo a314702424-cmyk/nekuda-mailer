@@ -620,6 +620,7 @@ try {
         const sent = req.headers['x-goog-api-key'] || new URL(req.url, 'http://x').searchParams.get('key');
         if (sent === 'AQ.nolist' && req.method === 'GET') { res.statusCode = 403; return res.end(JSON.stringify({ error: { status: 'PERMISSION_DENIED', message: 'Auth keys cannot list models' } })); }
         if (sent === 'AQ.query' && req.headers['x-goog-api-key']) { res.statusCode = 401; return res.end(JSON.stringify({ error: { status: 'UNAUTHENTICATED', message: 'ACCESS_TOKEN_TYPE_UNSUPPORTED credential' } })); }
+        if (sent === 'AQ.vertex') { res.statusCode = 403; return res.end(JSON.stringify({ error: { status: 'PERMISSION_DENIED', message: 'Requests to this API generativelanguage.googleapis.com method google.ai.generativelanguage.v1beta.GenerativeService.GenerateContent are blocked.' } })); }
         if (!['good-key', 'AQ.nolist', 'AQ.query'].includes(sent)) { res.statusCode = 400; return res.end(JSON.stringify({ error: { message: 'API key not valid. Please pass a valid API key.' } })); }
         if (req.method === 'GET') {
           return res.end(JSON.stringify({ models: [
@@ -641,6 +642,20 @@ try {
       });
     });
     process.env.GEMINI_BASE = `http://127.0.0.1:${await listen(fake)}`;
+    const vseen = [];
+    const fakeVertex = httpMod.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        res.setHeader('Content-Type', 'application/json');
+        const model = (decodeURIComponent(req.url).match(/^\/v1\/publishers\/google\/models\/([^:]+):generateContent/) || [])[1];
+        if (req.headers['x-goog-api-key'] !== 'AQ.vertex' || !model) { res.statusCode = 403; return res.end(JSON.stringify({ error: { status: 'PERMISSION_DENIED', message: 'blocked' } })); }
+        if (!['gemini-3.5-flash', 'gemini-9-custom'].includes(model)) { res.statusCode = 404; return res.end(JSON.stringify({ error: { status: 'NOT_FOUND', message: 'Publisher model not found' } })); }
+        vseen.push(model);
+        res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: '<p>תשובה מ-Vertex</p>' }] } }] }));
+      });
+    });
+    process.env.VERTEX_BASE = `http://127.0.0.1:${await listen(fakeVertex)}`;
     try {
       assert.equal((await ok('GET', '/api/meta')).ai, false);
       assert.equal((await call('POST', '/api/ai', { action: 'chat', prompt: 'שאלה' })).status, 400, 'בלי מפתח');
@@ -652,6 +667,14 @@ try {
       const nolist = await ok('POST', '/api/ai/test', { key: 'AQ.nolist' });
       assert.deepEqual([nolist.ok, nolist.used, !!nolist.listError, /AQ\./.test(nolist.format)], [true, 'gemini-flash-latest', true, true], 'מפתח שלא מורשה לרשימת המנועים עדיין עובד');
       assert.equal((await ok('POST', '/api/ai/test', { key: 'AQ.query' })).ok, true, 'מפתח שמתקבל רק בפרמטר key');
+      const vx = await ok('POST', '/api/ai/test', { key: 'AQ.vertex' });
+      assert.deepEqual([vx.ok, vx.vertex, vx.used, vx.auto], [true, true, 'gemini-3.5-flash', 'gemini-3.5-flash'], 'מפתח של Vertex AI מזוהה לבד: ' + JSON.stringify(vx));
+      await ok('PUT', '/api/settings', { aiKey: 'AQ.vertex', aiModel: '' });
+      assert.deepEqual(await ok('POST', '/api/ai', { action: 'rewrite', mode: 'improve', text: '<p>א</p>' }), { model: 'gemini-3.5-flash', html: '<p>תשובה מ-Vertex</p>' });
+      await ok('PUT', '/api/settings', { aiModel: 'gemini-9-custom' });
+      assert.equal((await ok('POST', '/api/ai', { action: 'rewrite', mode: 'improve', text: '<p>א</p>' })).model, 'gemini-9-custom', 'שם מנוע שהוקלד ידנית');
+      assert.equal(vseen.at(-1), 'gemini-9-custom');
+      await ok('PUT', '/api/settings', { clearAiKey: true, aiKey: '', aiModel: '' });
       const good = await ok('POST', '/api/ai/test', { key: 'good-key' });
       assert.deepEqual([good.ok, good.auto, good.used, good.models.map((m) => m.id)], [true, 'gemini-3.8-flash', 'gemini-3.8-flash', ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemma-3-27b-it']]);
       await ok('PUT', '/api/settings', { aiKey: ' good-key\u200e ', aiModel: '' });
@@ -679,7 +702,7 @@ try {
       cookie = adminCookie;
       await ok('PUT', '/api/settings', { clearAiKey: true, aiKey: '', aiModel: '' });
       assert.equal((await ok('GET', '/api/meta')).ai, false);
-    } finally { delete process.env.GEMINI_BASE; fake.close(); }
+    } finally { delete process.env.GEMINI_BASE; delete process.env.VERTEX_BASE; fake.close(); fakeVertex.close(); }
   }
   step('עוזר AI: זיהוי מנועים, בדיקת מפתח, מעבר למנוע חלופי, ניקוי פלט והרשאות');
 
