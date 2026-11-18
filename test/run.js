@@ -728,6 +728,26 @@ try {
   cookie = adminCookie;
   step('אייקון לאתר: לשונית, סימניות ומסך הבית');
 
+  // --- גרסה 0.7.6: כפתור ששולח מייל ---
+  {
+    const { prepareCampaign } = await import('../src/track.js');
+    const cm = (await ok('POST', '/api/campaigns', {})).id;
+    const dm = defaultDesign();
+    const mailHref = 'mailto:office@nekuda.org.il?subject=' + encodeURIComponent('הרשמה & שאלה') + '&body=' + encodeURIComponent('שלום,') + '%0D%0A' + encodeURIComponent('אני מעוניין');
+    dm.blocks = [{ type: 'button', text: 'כתבו לנו', action: 'mail', mailTo: 'office@nekuda.org.il', mailSubject: 'הרשמה & שאלה', href: mailHref },
+      { type: 'button', text: 'וואטסאפ', action: 'wa', href: 'https://wa.me/972501234567?text=' + encodeURIComponent('שלום') }];
+    await ok('PUT', `/api/campaigns/${cm}`, { subject: 'כפתור מייל', preheader: '', fromName: 'נ', fromEmail: 'office@nekuda.test', replyTo: '', mode: 'blocks', design: dm, listIds: [] });
+    prepareCampaign(app.db, app.db.get('SELECT * FROM campaigns WHERE id=?', cm));
+    const prepared = app.db.get('SELECT prepared_html, prepared_text FROM campaigns WHERE id=?', cm);
+    const got = (prepared.prepared_html.match(/href="(mailto:[^"]+)"/) || [])[1].replace(/&amp;/g, '&');
+    assert.equal(got, mailHref, 'קישור המייל נשאר שלם ולא עובר דרך מעקב הלחיצות');
+    const parsed = new URL(got);
+    assert.deepEqual([parsed.pathname, parsed.searchParams.get('subject'), parsed.searchParams.get('body')], ['office@nekuda.org.il', 'הרשמה & שאלה', 'שלום,\r\nאני מעוניין']);
+    assert.ok(!prepared.prepared_html.includes('href="https://wa.me') && /\/c\/\{\{TOKEN\}\}\/\d+/.test(prepared.prepared_html), 'קישור וואטסאפ נספר כלחיצה');
+    assert.equal(Number(app.db.get('SELECT COUNT(*) n FROM links WHERE campaign_id=?', cm).n), 1);
+  }
+  step('כפתור ששולח מייל: טיוטה עם כתובת, נושא וגוף, בלי לשבור את הקישור');
+
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
   smtp.close();
