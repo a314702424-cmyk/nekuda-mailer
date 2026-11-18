@@ -12,6 +12,7 @@ const formHits = new Map();
 
 const page = (title, body) => `<!DOCTYPE html><html lang="he" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)}</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="alternate icon" href="/favicon.png" type="image/png"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>body{margin:0;background:#eef0f4;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a}
 .box{max-width:440px;margin:8vh auto;background:#fff;border-radius:12px;padding:32px 28px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.06)}
 h1{font-size:22px;margin:0 0 12px}p{line-height:1.6;color:#4b5563}
