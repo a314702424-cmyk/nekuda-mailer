@@ -864,7 +864,7 @@ export function registerApi(router, { db, worker, version }) {
         case 'rewrite': {
           need(text, 'אין טקסט לעבוד עליו');
           const how = REWRITE[body.mode] || (prompt ? `בצע את ההנחיה הבאה על הטקסט: ${prompt}` : REWRITE.improve);
-          const r = await run(STYLE + HTML_OUT, `${how}\n\nהטקסט:\n${text}`, { temperature: body.mode === 'proofread' ? 0.1 : 0.6 });
+          const r = await run(STYLE + HTML_OUT + ' החזר רק את הטקסט המתוקן עצמו, באותו היקף שקיבלת: אם קיבלת משפט או כמה מילים, החזר משפט או כמה מילים, בלי תוספות לפניו או אחריו.', `${how}\n\nהטקסט:\n${text}`, { temperature: body.mode === 'proofread' ? 0.1 : 0.6 });
           return json(res, { model: r.model, html: cleanHtml(r.text) });
         }
         case 'subjects': {
