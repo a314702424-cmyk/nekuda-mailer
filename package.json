@@ -1,6 +1,6 @@
 {
   "name": "nekuda-mailer",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "מערכת דיוור עצמאית לנקודה: רשימות, בונה גליונות רספונסיבי, תור שליחה, מעקב וקפיצות",
   "type": "module",
   "private": true,
