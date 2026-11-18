@@ -198,6 +198,34 @@ export function registerPublic(router, { db }) {
     html(res, prefsPage(params.token, { ...sub, name: String(f.get('name') || '').slice(0, 120) }, 'השינויים נשמרו.'));
   }, { anyBody: true });
 
+  // ---------- מדיניות פרטיות ----------
+  const defaultPrivacy = (s) => `מדיניות זו מתארת איזה מידע נשמר במערכת הדיוור של ${s.fromName || 'האתר'} ולמה הוא משמש.
+
+איזה מידע נשמר
+כתובת המייל שלך, והשם אם מסרת אותו. בעת הרשמה נשמרים גם מועד ההרשמה וכתובת ה-IP, כתיעוד להסכמתך לקבל דיוור.
+לגבי כל גליון שנשלח אליך נשמר אם הוא נפתח ועל אילו קישורים לחצת. המידע משמש לשיפור הגליונות ולתחזוקת רשימת התפוצה.
+
+למה המידע משמש
+לשליחת הגליונות שביקשת לקבל, ולא לשום מטרה אחרת. המידע לא נמכר ולא מועבר לגורם אחר.
+
+הסרה ועדכון
+בתחתית כל גליון יש קישור להסרה מרשימת התפוצה, והוא פועל מיד. אפשר גם לבקש לעיין במידע עליך, לתקן אותו או למחוק אותו, בפנייה לכתובת שלמטה.
+
+כניסת צוות עם חשבון Google
+אנשי הצוות שמנהלים את המערכת יכולים להיכנס עם חשבון Google. בכניסה כזו מתקבלת מ-Google כתובת המייל בלבד, והיא משמשת רק לזיהוי המשתמש. לא מתבקשת גישה לתיבת הדואר, לאנשי הקשר או לכל מידע אחר בחשבון.
+
+יצירת קשר
+${s.replyTo || s.fromEmail || ''}${s.companyAddress ? '\n' + s.companyAddress : ''}`;
+  router.add('GET', '/privacy', ({ res }) => {
+    const s = db.settings();
+    const text = (s.privacyText || '').trim() || defaultPrivacy(s);
+    const body = esc(text).split(/\n{2,}/).map((para) => {
+      const [first, ...rest] = para.split('\n');
+      return rest.length ? `<h2 style="font-size:17px;margin:22px 0 6px">${first}</h2><p style="margin:0">${rest.join('<br>')}</p>` : `<p>${first}</p>`;
+    }).join('');
+    html(res, page('מדיניות פרטיות', `<div style="text-align:right;color:#1a1a1a"><h1>מדיניות פרטיות</h1>${body}</div>`));
+  });
+
   // ---------- סקר בתוך גליון ----------
   router.add('GET', '/poll/:token/:pid/:answer', ({ res, params }) => {
     const ids = readToken(secret(), params.token);

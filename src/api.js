@@ -921,7 +921,7 @@ export function registerApi(router, { db, worker, version }) {
         if (k === 'googleClientSecret' && !body.googleClientSecret && !body.clearGoogleSecret) continue;
         if (k === 'aiKey' && !body.aiKey && !body.clearAiKey) continue;
         if (k === 'formColor' && !/^#[0-9a-f]{6}$/i.test(body[k])) continue;
-        db.setSetting(k, k === 'baseUrl' ? String(body[k]).replace(/\/+$/, '') : str(body[k], ['formIntro', 'confirmText', 'customFields'].includes(k) ? 2000 : 500).trim());
+        db.setSetting(k, k === 'baseUrl' ? String(body[k]).replace(/\/+$/, '') : str(body[k], k === 'privacyText' ? 8000 : ['formIntro', 'confirmText', 'customFields'].includes(k) ? 2000 : 500).trim());
       }
     });
     json(res, { ok: true });

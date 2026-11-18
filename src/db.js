@@ -78,6 +78,7 @@ export const DEFAULT_SETTINGS = {
   formColor: '#1b4fd8',
   formLogo: '',
   formAskName: '1',
+  privacyText: '',
   customFields: '',
   aiKey: '',
   aiModel: '',
