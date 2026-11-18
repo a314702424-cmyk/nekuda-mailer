@@ -738,29 +738,34 @@ async function settingsPage() {
       ),
     (() => {
       const key = h('input', { type: 'password', autocomplete: 'new-password', class: 'ltr', placeholder: s.hasAiKey ? 'מפתח שמור. להשאיר ריק כדי לא לשנות' : 'מפתח מ-Google AI Studio' });
-      const model = h('select', {}, h('option', { value: '' }, 'בחירה אוטומטית (מומלץ)'), s.aiModel ? h('option', { value: s.aiModel, selected: true }, s.aiModel) : null);
+      // שדה חופשי עם הצעות: אפשר לבחור מנוע מהרשימה שחזרה מ-Google, או להקליד שם מנוע ידנית
+      const options = h('datalist', { id: 'ai-models' });
+      const model = h('input', { type: 'text', class: 'ltr', value: s.aiModel || '', placeholder: 'ריק = בחירה אוטומטית (מומלץ)', autocomplete: 'off' });
+      model.setAttribute('list', 'ai-models');
       f.aiKey = key; f.aiModel = model;
       const status = h('div', { class: 'ai-status' }, s.hasAiKey ? 'יש מפתח שמור. לחיצה על "בדיקת המפתח" בודקת שהוא עובד.' : 'עדיין לא הוזן מפתח.');
       const test = h('button', { type: 'button', onclick: async () => {
         test.disabled = true; status.className = 'ai-status'; status.textContent = 'בודק את המפתח מול Google…';
         try {
           const r = await api('POST', '/ai/test', { key: key.value, model: model.value });
-          const keep = model.value;
-          model.replaceChildren(h('option', { value: '' }, r.auto ? `בחירה אוטומטית (כרגע: ${r.auto})` : 'בחירה אוטומטית (מומלץ)'),
-            ...r.models.map((m) => h('option', { value: m.id, selected: m.id === keep }, `${m.name} · ${m.id}`)));
+          options.replaceChildren(...r.models.map((m) => h('option', { value: m.id }, m.name === m.id ? '' : m.name)));
+          model.placeholder = r.auto ? `ריק = בחירה אוטומטית (כרגע: ${r.auto})` : 'ריק = בחירה אוטומטית (מומלץ)';
           status.className = 'ai-status ' + (r.ok ? 'good' : 'bad');
           status.replaceChildren(...[h('b', {}, r.ok ? '✔ המפתח תקין והעוזר עובד' : r.models.length ? '✖ המפתח מזוהה, אבל בקשת הניסיון נכשלה' : '✖ המפתח לא עובד'), h('br'),
-            r.models.length ? `נמצאו ${r.models.length} מנועים זמינים למפתח (${r.models.filter((m) => m.family === 'gemini').length} Gemini, ${r.models.filter((m) => m.family === 'gemma').length} Gemma). ` : '',
+            r.vertex ? 'זוהה מפתח של Vertex AI (Agent Platform). המערכת פונה איתו לכתובת של Vertex במקום לזו של AI Studio. '
+              : r.models.length && !r.listError ? `נמצאו ${r.models.length} מנועים זמינים למפתח (${r.models.filter((m) => m.family === 'gemini').length} Gemini, ${r.models.filter((m) => m.family === 'gemma').length} Gemma). ` : '',
             r.ok ? `המנוע שנבדק: ${r.used}. התשובה חזרה תוך ${(r.ms / 1000).toFixed(1)} שניות.` : (r.error || ''),
             r.format ? h('div', { class: 'muted' }, r.format + (r.cleaned ? '. הוסרו מהמפתח רווחים או תווים נסתרים שנדבקו בהעתקה.' : '')) : null,
-            r.listError ? h('div', { class: 'muted' }, 'רשימת המנועים לא התקבלה, ולכן נעשה ניסיון עם המנוע העדכני של Google.') : null,
+            r.vertex ? h('div', { class: 'muted' }, 'במפתח מסוג זה Google לא מחזיר רשימת מנועים. המערכת מצאה לבד מנוע שעובד, ואפשר גם להקליד שם מנוע אחר בשדה "מנוע".') : null,
+            r.listError ? h('div', { class: 'muted' }, 'המפתח נדחה גם בכתובת של AI Studio וגם בכתובת של Vertex AI.') : null,
+            !r.ok && r.vertexError ? h('div', { class: 'ltr muted', style: 'font-size:12px' }, 'התשובה מ-Vertex AI: ' + r.vertexError) : null,
             !r.ok && (r.detail || r.listError) ? h('div', { class: 'ltr muted', style: 'margin-top:6px;font-size:12px' }, 'התשובה מ-Google: ' + (r.detail || r.listError)) : null,
             r.ok && key.value ? h('div', {}, 'לא לשכוח ללחוץ "שמירת הגדרות" כדי לשמור את המפתח.') : null].filter(Boolean));
         } catch (e) { status.className = 'ai-status bad'; status.textContent = '✖ ' + e.message; } finally { test.disabled = false; }
       } }, 'בדיקת המפתח');
       return h('div', { class: 'card' }, h('h2', {}, 'עוזר AI (Google AI Studio)'),
-        h('p', { class: 'muted' }, 'המפתח נוצר בחינם ב-aistudio.google.com, בלחיצה על "Get API key". המערכת מזהה לבד אילו מנועים המפתח מאפשר (Gemini לכל סוגיו וגם Gemma), ובוחרת את המתאים. אפשר גם לבחור מנוע מסוים אחרי בדיקת המפתח. השימוש מחויב לפי התנאים של Google לחשבון שלך.'),
-        h('div', { class: 'row' }, h('div', { class: 'grow' }, field('מפתח API', key)), h('div', { class: 'grow' }, field('מנוע', model)), h('div', {}, field('\u00a0', test))),
+        h('p', { class: 'muted' }, 'המפתח נוצר בחינם ב-aistudio.google.com, בלחיצה על "Get API key". מתקבלים מפתחות בפורמט הישן (AIza) ובפורמט החדש (AQ.), וגם מפתחות של Vertex AI (Agent Platform) מ-Google Cloud. המערכת מזהה לבד את סוג המפתח ואילו מנועים הוא מאפשר (Gemini לכל סוגיו וגם Gemma), ובוחרת את המתאים. אפשר גם לבחור מנוע מסוים אחרי בדיקת המפתח. השימוש מחויב לפי התנאים של Google לחשבון שלך.'),
+        h('div', { class: 'row' }, h('div', { class: 'grow' }, field('מפתח API', key)), h('div', { class: 'grow' }, field('מנוע (אפשר לבחור מהרשימה או להקליד שם)', model)), h('div', {}, field('\u00a0', test))), options,
         status);
     })(),
     h('div', { class: 'card' }, h('h2', {}, 'שדות מותאמים לנמען'),
