@@ -51,6 +51,8 @@ export function createApp({ dataDir, startWorker = true, log = console } = {}) {
         throw new HttpError(404, 'לא נמצא');
       }
       const rel = url.pathname === '/' || url.pathname === '/admin' ? 'index.html' : url.pathname;
+      // דפדפנים ישנים מבקשים favicon.ico גם בלי קישור: מגישים להם את גרסת ה-PNG
+      if (rel === '/favicon.ico') { res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' }); return res.end(fs.readFileSync(path.join(webDir, 'favicon.png'))); }
       if (serveFile(res, webDir, rel)) return;
       throw new HttpError(404, 'לא נמצא');
     } catch (e) {
