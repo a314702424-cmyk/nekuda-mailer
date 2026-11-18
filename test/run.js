@@ -684,6 +684,17 @@ try {
   await ok('PUT', '/api/settings', { privacyText: '' });
   step('דף מדיניות פרטיות ציבורי, עם נוסח מובנה ואפשרות עריכה');
 
+  // --- גרסה 0.7.2: אייקון ---
+  cookie = '';
+  for (const [f, type] of [['/favicon.svg', 'image/svg+xml'], ['/favicon.png', 'image/png'], ['/apple-touch-icon.png', 'image/png'], ['/icon-192.png', 'image/png'], ['/favicon.ico', 'image/png']]) {
+    const r = await fetch(base + f);
+    assert.equal(r.status, 200, f);
+    assert.ok(String(r.headers.get('content-type')).startsWith(type), f);
+  }
+  assert.ok((await ok('GET', '/')).includes('rel="icon"') && (await ok('GET', '/privacy')).includes('rel="icon"'));
+  cookie = adminCookie;
+  step('אייקון לאתר: לשונית, סימניות ומסך הבית');
+
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
   smtp.close();
