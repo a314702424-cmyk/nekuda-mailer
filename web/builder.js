@@ -153,22 +153,45 @@ export async function mountBuilder(container, design, opts) {
     } }, h('option', { value: '' }, 'גודל'), [12, 14, 16, 18, 20, 24, 28, 34].map((n) => h('option', { value: n }, n)));
     const face = h('select', { title: 'גופן לטקסט המסומן', onchange: () => { if (face.value) run('fontName', face.value); face.value = ''; } },
       h('option', { value: '' }, 'גופן'), FONTS.map(([v, t]) => h('option', { value: v }, t)));
-    const aiMenu = h('select', { class: 'ai-menu', title: 'עוזר AI לבלוק הזה', onchange: async () => {
+    // הבחירה האחרונה בתוך הבלוק נשמרת, כי פתיחת תפריט העוזר מעבירה את המיקוד ומבטלת את הסימון
+    let lastRange = null;
+    const remember = () => { const sel = window.getSelection(); if (sel.rangeCount && area.contains(sel.getRangeAt(0).commonAncestorContainer)) lastRange = sel.getRangeAt(0).cloneRange(); };
+    document.addEventListener('selectionchange', () => { if (document.activeElement === area) remember(); });
+    const liveRange = () => (lastRange && area.contains(lastRange.commonAncestorContainer) ? lastRange : null);
+    const restore = (range) => { area.focus(); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); };
+    // תוצאה של פסקה אחת נכנסת לתוך הפסקה הקיימת בלי לשבור אותה
+    const inline = (htmlStr) => { const m = /^\s*<p>([\s\S]*)<\/p>\s*$/.exec(htmlStr); return m && !/<\/?(p|ul|ol)\b/i.test(m[1]) ? m[1] : htmlStr; };
+    const aiMenu = h('select', { class: 'ai-menu', title: 'עוזר AI. אם סימנת חלק מהטקסט, העוזר יעבוד רק עליו', onchange: async () => {
       const mode = aiMenu.value; aiMenu.value = '';
       if (!mode) return;
+      const range = liveRange();
+      const picked = range && !range.collapsed ? range : null;
+      let pickedHtml = '';
+      if (picked) { const box = document.createElement('div'); box.append(picked.cloneContents()); pickedHtml = box.innerHTML; }
+      if (picked && !plain(pickedHtml)) { notify('הסימון ריק. סמן טקסט, או בטל את הסימון כדי לעבוד על כל הבלוק', true); return; }
       const has = plain(area.innerHTML);
       let prompt = '';
       if (mode === 'write' || mode === 'custom') {
-        prompt = window.prompt(mode === 'write' ? 'על מה לכתוב? אפשר לפרט נקודות, אורך וסגנון:' : 'מה לעשות עם הטקסט? למשל: "הפוך לרשימת נקודות":', '') || '';
+        prompt = window.prompt(mode === 'write' ? 'על מה לכתוב? אפשר לפרט נקודות, אורך וסגנון:' : `מה לעשות עם ${picked ? 'הטקסט המסומן' : 'הטקסט'}? למשל: "הפוך לרשימת נקודות":`, '') || '';
         if (!prompt.trim()) return;
       } else if (!has) { notify('הבלוק ריק. קודם כותבים טקסט, או בוחרים "כתוב לפי הנחיה"', true); return; }
       aiMenu.disabled = true; area.classList.add('busy');
       try {
         const r = await ai(mode === 'write' ? { action: 'write', prompt, context: plain(design.blocks.map((x) => x.text || x.html || '').join(' ')).slice(0, 4000) }
-          : { action: 'rewrite', mode: mode === 'custom' ? '' : mode, prompt, text: area.innerHTML });
-        if (r && r.html) { area.innerHTML = r.html; sync(); notify('הטקסט עודכן. אפשר לבטל בכפתור "בטל" למעלה'); }
+          : { action: 'rewrite', mode: mode === 'custom' ? '' : mode, prompt, text: picked ? pickedHtml : area.innerHTML });
+        if (!r || !r.html) return;
+        if (picked) {
+          // רק הקטע המסומן מוחלף. שאר הבלוק נשאר כמו שהוא
+          restore(picked); document.execCommand('insertHTML', false, inline(r.html)); sync();
+          notify('הקטע המסומן עודכן. אפשר לבטל בכפתור "בטל" למעלה');
+        } else if (mode === 'write' && has) {
+          // כתיבה חדשה בבלוק שכבר יש בו תוכן נכנסת במקום הסמן, או בסוף הבלוק, ולא מוחקת את הקיים
+          if (range) { restore(range); document.execCommand('insertHTML', false, r.html); } else area.insertAdjacentHTML('beforeend', r.html);
+          sync(); notify('הטקסט החדש נוסף לבלוק. אפשר לבטל בכפתור "בטל" למעלה');
+        } else { area.innerHTML = r.html; sync(); notify('הטקסט עודכן. אפשר לבטל בכפתור "בטל" למעלה'); }
+        lastRange = null;
       } finally { aiMenu.disabled = false; area.classList.remove('busy'); }
-    } }, h('option', { value: '' }, '✨ עוזר AI'), [['write', 'כתוב לפי הנחיה…'], ['improve', 'שפר ניסוח'], ['shorten', 'קצר'], ['lengthen', 'הרחב'], ['proofread', 'הגהה בלבד'],
+    } }, h('option', { value: '' }, '✨ עוזר AI'), [['write', 'כתוב לפי הנחיה…'], ['improve', 'שפר ניסוח (מסומן או הכול)'], ['shorten', 'קצר'], ['lengthen', 'הרחב'], ['proofread', 'הגהה בלבד'],
       ['formal', 'רשמי יותר'], ['friendly', 'חם ואישי יותר'], ['custom', 'הנחיה חופשית…']].map(([v, t]) => h('option', { value: v }, t)));
     const tools = h('div', { class: 'rte-tools' },
       btn('B', 'מודגש', () => run('bold'), 'font-weight:bold'), btn('I', 'נטוי', () => run('italic'), 'font-style:italic'), btn('U', 'קו תחתון', () => run('underline'), 'text-decoration:underline'),
