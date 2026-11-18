@@ -673,6 +673,17 @@ try {
   }
   step('עוזר AI: זיהוי מנועים, בדיקת מפתח, מעבר למנוע חלופי, ניקוי פלט והרשאות');
 
+  // --- גרסה 0.7.1: דף מדיניות פרטיות ---
+  cookie = '';
+  const priv = await ok('GET', '/privacy');
+  assert.ok(priv.includes('מדיניות פרטיות') && priv.includes('כניסת צוות עם חשבון Google') && priv.includes('כתובת המייל בלבד'));
+  cookie = adminCookie;
+  await ok('PUT', '/api/settings', { privacyText: 'פתיחה <b>\n\nכותרת\nגוף הפסקה' });
+  const priv2 = await ok('GET', '/privacy');
+  assert.ok(priv2.includes('<p>פתיחה &lt;b&gt;</p>') && priv2.includes('>כותרת</h2>') && !priv2.includes('כניסת צוות'));
+  await ok('PUT', '/api/settings', { privacyText: '' });
+  step('דף מדיניות פרטיות ציבורי, עם נוסח מובנה ואפשרות עריכה');
+
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
   smtp.close();
