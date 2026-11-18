@@ -599,6 +599,80 @@ try {
   }
   step('שדות מותאמים, קבצים מצורפים, בדיקת A/B, תנאי תצוגה, סקר ואוטומציות');
 
+  // --- גרסה 0.7.0: עוזר AI מול שרת Gemini מדומה ---
+  {
+    const { rankModels, cleanHtml, parseJson } = await import('../src/ai.js');
+    assert.deepEqual(rankModels(['gemma-3-27b-it', 'gemini-2.5-pro', 'gemini-3.8-flash-preview', 'gemini-2.5-flash-lite', 'gemini-3.8-flash', 'gemini-4-argon', 'gemini-2.5-flash']
+      .map((id) => ({ id, family: id.startsWith('gemma') ? 'gemma' : 'gemini' }))).map((m) => m.id).slice(0, 3), ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-4-argon'], 'מנוע מהיר, יציב וחדש קודם');
+    assert.equal(cleanHtml('```html\n<h2 onclick="x()">כותרת</h2><p style="color:red">טקסט <a href="javascript:alert(1)">רע</a> <a href="https://ok.org" target="_blank">טוב</a></p><script>x()</script>\n```'),
+      '<p><b>כותרת</b></p><p>טקסט רע <a href="https://ok.org">טוב</a></p>');
+    assert.equal(cleanHtml('שורה א\n\nשורה ב'), '<p>שורה א</p><p>שורה ב</p>');
+    assert.deepEqual(parseJson('הנה:\n```json\n[{"a":1}]\n```'), [{ a: 1 }]);
+
+    const httpMod = await import('node:http');
+    const seen = [];
+    let failModel = '';
+    const fake = httpMod.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        res.setHeader('Content-Type', 'application/json');
+        if (req.headers['x-goog-api-key'] !== 'good-key') { res.statusCode = 400; return res.end(JSON.stringify({ error: { message: 'API key not valid. Please pass a valid API key.' } })); }
+        if (req.method === 'GET') {
+          return res.end(JSON.stringify({ models: [
+            { name: 'models/gemini-embedding-001', displayName: 'Embedding', supportedGenerationMethods: ['embedContent'] },
+            { name: 'models/gemini-3.8-flash', displayName: 'Gemini 3.8 Flash', supportedGenerationMethods: ['generateContent'] },
+            { name: 'models/gemini-2.5-flash', displayName: 'Gemini 2.5 Flash', supportedGenerationMethods: ['generateContent'] },
+            { name: 'models/gemini-3.8-flash-image', displayName: 'Image', supportedGenerationMethods: ['generateContent'] },
+            { name: 'models/gemma-3-27b-it', displayName: 'Gemma 3', supportedGenerationMethods: ['generateContent'] }] }));
+        }
+        const model = decodeURIComponent(req.url).match(/models\/([^:]+):generateContent/)[1];
+        const body = JSON.parse(raw);
+        seen.push({ model, body });
+        if (model === failModel) { res.statusCode = 429; return res.end(JSON.stringify({ error: { message: 'quota' } })); }
+        const ask = body.contents[0].parts[0].text;
+        const text = /חמש שורות נושא/.test(ask) ? '```json\n[{"subject":"נושא מוצע","preheader":"תקציר מוצע"},{"subject":""}]\n```'
+          : /בנה טיוטת גליון/.test(ask) ? '{"subject":"גליון חנוכה","preheader":"חג שמח","blocks":[{"type":"heading","text":"חנוכה","level":1},{"type":"text","html":"<p onclick=\\"x\\">שלום</p><script>1</script>"},{"type":"button","text":"הרשמה","href":"javascript:1"},{"type":"video","url":"x"}]}'
+            : '<p style="x">טקסט <b>משופר</b></p>';
+        res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }] }));
+      });
+    });
+    process.env.GEMINI_BASE = `http://127.0.0.1:${await listen(fake)}`;
+    try {
+      assert.equal((await ok('GET', '/api/meta')).ai, false);
+      assert.equal((await call('POST', '/api/ai', { action: 'chat', prompt: 'שאלה' })).status, 400, 'בלי מפתח');
+      const bad = await ok('POST', '/api/ai/test', { key: 'wrong' });
+      assert.ok(!bad.ok && /המפתח לא תקין/.test(bad.error));
+      const good = await ok('POST', '/api/ai/test', { key: 'good-key' });
+      assert.deepEqual([good.ok, good.auto, good.used, good.models.map((m) => m.id)], [true, 'gemini-3.8-flash', 'gemini-3.8-flash', ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemma-3-27b-it']]);
+      await ok('PUT', '/api/settings', { aiKey: 'good-key', aiModel: '' });
+      const st7 = await ok('GET', '/api/settings');
+      assert.deepEqual([st7.aiKey, st7.hasAiKey], ['', true], 'המפתח לא נחשף');
+      assert.equal((await ok('GET', '/api/meta')).ai, true);
+      const rw = await ok('POST', '/api/ai', { action: 'rewrite', mode: 'shorten', text: '<p>טקסט ארוך</p>' });
+      assert.deepEqual([rw.html, rw.model], ['<p>טקסט <b>משופר</b></p>', 'gemini-3.8-flash']);
+      assert.ok(seen.at(-1).body.systemInstruction.parts[0].text.includes('עברית') && /קצר את הטקסט/.test(seen.at(-1).body.contents[0].parts[0].text));
+      failModel = 'gemini-3.8-flash';
+      assert.equal((await ok('POST', '/api/ai', { action: 'write', prompt: 'כתוב ברכה' })).model, 'gemini-2.5-flash', 'כשנגמרת המכסה עוברים למנוע הבא');
+      failModel = '';
+      assert.deepEqual((await ok('POST', '/api/ai', { action: 'subjects', context: 'תוכן הגליון' })).subjects, [{ subject: 'נושא מוצע', preheader: 'תקציר מוצע' }]);
+      const dr = await ok('POST', '/api/ai', { action: 'draft', prompt: 'גליון חנוכה' });
+      assert.deepEqual(dr.blocks.map((b) => b.type), ['heading', 'text', 'button']);
+      assert.deepEqual([dr.blocks[1].html, dr.blocks[2].href, dr.subject], ['<p>שלום</p>', 'https://', 'גליון חנוכה']);
+      await ok('PUT', '/api/settings', { aiModel: 'gemma-3-27b-it' });
+      await ok('POST', '/api/ai', { action: 'chat', prompt: 'מה דעתך?' });
+      assert.ok(seen.at(-1).model === 'gemma-3-27b-it' && !seen.at(-1).body.systemInstruction && seen.at(-1).body.contents[0].parts[0].text.includes('עוזר כתיבה'), 'ל-Gemma ההנחיה בתוך ההודעה');
+      cookie = '';
+      await ok('POST', '/api/login', { username: 'editor', password: 'editor-pass-123' });
+      assert.equal((await call('POST', '/api/ai', { action: 'chat', prompt: 'x' })).status, 403, 'בלי הרשאת עריכה אין עוזר');
+      assert.equal((await call('POST', '/api/ai/test', { key: 'good-key' })).status, 403);
+      cookie = adminCookie;
+      await ok('PUT', '/api/settings', { clearAiKey: true, aiKey: '', aiModel: '' });
+      assert.equal((await ok('GET', '/api/meta')).ai, false);
+    } finally { delete process.env.GEMINI_BASE; fake.close(); }
+  }
+  step('עוזר AI: זיהוי מנועים, בדיקת מפתח, מעבר למנוע חלופי, ניקוי פלט והרשאות');
+
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
   smtp.close();
