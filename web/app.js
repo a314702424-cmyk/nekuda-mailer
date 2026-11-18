@@ -783,6 +783,8 @@ async function settingsPage() {
       field('הודעה באתר אחרי שליחת מייל האישור', inp('formPending')),
       h('div', { class: 'row' }, h('div', { class: 'grow' }, field('ארכיון גליונות ציבורי (/archive)', (f.archiveEnabled = h('select', {}, h('option', { value: '0', selected: s.archiveEnabled !== '1' }, 'כבוי'), h('option', { value: '1', selected: s.archiveEnabled === '1' }, 'פעיל: מוצגים גליונות שסומנו במסך הנתונים'))))),
         h('div', { class: 'grow' }, field('כותרת הארכיון', inp('archiveTitle')))),
+      field('מדיניות פרטיות (מוצגת בכתובת /privacy). ריק = הנוסח המובנה. שורה ריקה מפרידה בין פסקאות, ושורה ראשונה בפסקה היא כותרת', (f.privacyText = h('textarea', { value: s.privacyText || '', style: 'min-height:90px' }))),
+      h('p', { class: 'muted small-note' }, h('a', { href: '/privacy', target: '_blank' }, 'צפייה בדף מדיניות הפרטיות')),
       h('label', {}, 'קוד להטמעת הטופס באתר אחר'),
       h('pre', { class: 'code' }, `<form action="${s.baseUrl}/subscribe" method="post">\n  <input name="name" placeholder="שם">\n  <input name="email" type="email" placeholder="כתובת מייל" required>\n  <input name="website" style="display:none" tabindex="-1" autocomplete="off">\n  <button type="submit">הרשמה</button>\n</form>`)),
     h('div', { class: 'card' }, h('h2', {}, 'כניסה עם Google'),
