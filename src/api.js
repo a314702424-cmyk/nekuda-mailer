@@ -11,7 +11,7 @@ import { enqueueCampaign, sentToday, campaignAttachments } from './worker.js';
 import { buildMessage, SmtpConnection, smtpOptions } from './mailer.js';
 import { ALL_PERMS, permFor } from '../web/shared/perms.js';
 import { htmlToPdf, chromePath } from './pdf.js';
-import { ask, testKey, cleanHtml, parseJson, AiError } from './ai.js';
+import { ask, testKey, cleanHtml, cleanKey, parseJson, AiError } from './ai.js';
 
 const FIELD_KEY = /^[a-z][a-z0-9_]{1,20}$/;
 const RESERVED = ['name', 'first_name', 'email', 'unsubscribe_url', 'webview_url', 'preferences_url', 'base', 'token'];
@@ -827,9 +827,9 @@ export function registerApi(router, { db, worker, version }) {
   // ---------- עוזר AI ----------
   const aiFail = (e) => { if (e instanceof AiError) throw new HttpError(e.status, e.message); throw e; };
   api('POST', '/ai/test', async ({ res, body }) => {
-    const key = str(body.key, 200).trim() || db.setting('aiKey');
+    const key = str(body.key, 500).trim() || db.setting('aiKey');
     need(key, 'קודם יש להזין מפתח');
-    try { json(res, await testKey(key, str(body.model, 100).trim())); } catch (e) { json(res, { ok: false, models: [], error: e.message }); }
+    try { json(res, await testKey(key, str(body.model, 100).trim())); } catch (e) { json(res, { ok: false, models: [], error: e.message, detail: e.detail || '' }); }
   });
 
   const aiHits = new Map();
@@ -920,6 +920,7 @@ export function registerApi(router, { db, worker, version }) {
         if (k === 'smtpPass' && !body.smtpPass && !body.clearSmtpPass) continue;
         if (k === 'googleClientSecret' && !body.googleClientSecret && !body.clearGoogleSecret) continue;
         if (k === 'aiKey' && !body.aiKey && !body.clearAiKey) continue;
+        if (k === 'aiKey') { db.setSetting(k, cleanKey(str(body[k], 500))); continue; }
         if (k === 'formColor' && !/^#[0-9a-f]{6}$/i.test(body[k])) continue;
         db.setSetting(k, k === 'baseUrl' ? String(body[k]).replace(/\/+$/, '') : str(body[k], k === 'privacyText' ? 8000 : ['formIntro', 'confirmText', 'customFields'].includes(k) ? 2000 : 500).trim());
       }
