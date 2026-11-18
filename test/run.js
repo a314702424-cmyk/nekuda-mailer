@@ -617,7 +617,10 @@ try {
       req.on('data', (c) => { raw += c; });
       req.on('end', () => {
         res.setHeader('Content-Type', 'application/json');
-        if (req.headers['x-goog-api-key'] !== 'good-key') { res.statusCode = 400; return res.end(JSON.stringify({ error: { message: 'API key not valid. Please pass a valid API key.' } })); }
+        const sent = req.headers['x-goog-api-key'] || new URL(req.url, 'http://x').searchParams.get('key');
+        if (sent === 'AQ.nolist' && req.method === 'GET') { res.statusCode = 403; return res.end(JSON.stringify({ error: { status: 'PERMISSION_DENIED', message: 'Auth keys cannot list models' } })); }
+        if (sent === 'AQ.query' && req.headers['x-goog-api-key']) { res.statusCode = 401; return res.end(JSON.stringify({ error: { status: 'UNAUTHENTICATED', message: 'ACCESS_TOKEN_TYPE_UNSUPPORTED credential' } })); }
+        if (!['good-key', 'AQ.nolist', 'AQ.query'].includes(sent)) { res.statusCode = 400; return res.end(JSON.stringify({ error: { message: 'API key not valid. Please pass a valid API key.' } })); }
         if (req.method === 'GET') {
           return res.end(JSON.stringify({ models: [
             { name: 'models/gemini-embedding-001', displayName: 'Embedding', supportedGenerationMethods: ['embedContent'] },
@@ -643,9 +646,16 @@ try {
       assert.equal((await call('POST', '/api/ai', { action: 'chat', prompt: 'שאלה' })).status, 400, 'בלי מפתח');
       const bad = await ok('POST', '/api/ai/test', { key: 'wrong' });
       assert.ok(!bad.ok && /המפתח לא תקין/.test(bad.error));
+      assert.ok(/HTTP 400/.test(bad.detail) && /לא מוכר/.test(bad.format), 'חיווי מפורט: ' + JSON.stringify(bad));
+      const messy = await ok('POST', '/api/ai/test', { key: ' "good-key"\u200f\n' });
+      assert.deepEqual([messy.ok, messy.cleaned], [true, true], 'מפתח עם רווחים ותווים נסתרים מנוקה');
+      const nolist = await ok('POST', '/api/ai/test', { key: 'AQ.nolist' });
+      assert.deepEqual([nolist.ok, nolist.used, !!nolist.listError, /AQ\./.test(nolist.format)], [true, 'gemini-flash-latest', true, true], 'מפתח שלא מורשה לרשימת המנועים עדיין עובד');
+      assert.equal((await ok('POST', '/api/ai/test', { key: 'AQ.query' })).ok, true, 'מפתח שמתקבל רק בפרמטר key');
       const good = await ok('POST', '/api/ai/test', { key: 'good-key' });
       assert.deepEqual([good.ok, good.auto, good.used, good.models.map((m) => m.id)], [true, 'gemini-3.8-flash', 'gemini-3.8-flash', ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemma-3-27b-it']]);
-      await ok('PUT', '/api/settings', { aiKey: 'good-key', aiModel: '' });
+      await ok('PUT', '/api/settings', { aiKey: ' good-key\u200e ', aiModel: '' });
+      assert.equal(app.db.setting('aiKey'), 'good-key', 'המפתח נשמר נקי');
       const st7 = await ok('GET', '/api/settings');
       assert.deepEqual([st7.aiKey, st7.hasAiKey], ['', true], 'המפתח לא נחשף');
       assert.equal((await ok('GET', '/api/meta')).ai, true);
