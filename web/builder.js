@@ -232,6 +232,59 @@ export async function mountBuilder(container, design, opts) {
     return field('רקע הבלוק', h('div', { class: 'row' }, c, h('button', { type: 'button', class: 'small', onclick: () => { delete b.blockBg; c.value = design.settings.contentBg; changed(); } }, 'ללא')));
   }
 
+  /**
+   * מה קורה בלחיצה על הכפתור: קישור לאתר, פתיחת טיוטת מייל, חיוג או הודעת וואטסאפ.
+   * הבחירה נשמרת בשדות נפרדים, ומהם נבנה הקישור עצמו (href), כך שהמייל שנשלח לא תלוי בעורך.
+   */
+  function buttonAction(b) {
+    if (!b.action) b.action = /^mailto:/i.test(b.href || '') ? 'mail' : /^tel:/i.test(b.href || '') ? 'tel' : /^https:\/\/wa\.me\//i.test(b.href || '') ? 'wa' : 'link';
+    if (b.action === 'mail' && b.mailTo === undefined) {
+      // כפתור ישן שהקישור שלו הוקלד ידנית כ-mailto: מפרקים אותו לשדות
+      const m = /^mailto:([^?]*)\??(.*)$/i.exec(b.href || '') || [];
+      const q = new URLSearchParams(m[2] || '');
+      b.mailTo = decodeURIComponent(m[1] || ''); b.mailSubject = q.get('subject') || ''; b.mailBody = q.get('body') || '';
+    }
+    if (b.action === 'tel' && b.phone === undefined) b.phone = (b.href || '').replace(/^tel:/i, '');
+    const digits = (x) => String(x || '').replace(/[^\d+]/g, '');
+    const intl = (x) => { const d = digits(x).replace(/^\+/, ''); return d.startsWith('0') ? '972' + d.slice(1) : d; }; // מספר ישראלי מקומי הופך לבינלאומי
+    const enc = (x) => encodeURIComponent(String(x || '')).replace(/%20/g, '%20');
+    const build = () => {
+      if (b.action === 'mail') {
+        const parts = [b.mailSubject ? 'subject=' + enc(b.mailSubject) : '', b.mailBody ? 'body=' + enc(b.mailBody).replace(/%0A/g, '%0D%0A') : ''].filter(Boolean);
+        b.href = 'mailto:' + String(b.mailTo || '').trim().replace(/\s+/g, '') + (parts.length ? '?' + parts.join('&') : '');
+      } else if (b.action === 'tel') b.href = 'tel:' + digits(b.phone);
+      else if (b.action === 'wa') b.href = 'https://wa.me/' + intl(b.phone) + (b.waText ? '?text=' + enc(b.waText) : '');
+      changed();
+    };
+    const box = h('div', { class: 'btn-action' });
+    const inp = (key, type, attrs = {}) => h('input', { type, value: b[key] || '', ...attrs, oninput: (e) => { b[key] = e.target.value; build(); } });
+    const area = (key, attrs = {}) => h('textarea', { value: b[key] || '', style: 'min-height:60px', ...attrs, oninput: (e) => { b[key] = e.target.value; build(); } });
+    const draw = () => {
+      if (b.action === 'mail') {
+        box.replaceChildren(h('div', { class: 'fields' }, field('לאיזו כתובת יישלח המייל', inp('mailTo', 'email', { class: 'ltr', placeholder: 'office@nekuda.org.il' })),
+          field('מה יהיה רשום בנושא', inp('mailSubject', 'text', { placeholder: 'למשל: הרשמה לערב העיון' }))),
+        field('טקסט שיופיע בגוף המייל (לא חובה)', area('mailBody', { placeholder: 'למשל: שלום, אני מעוניין להירשם. שמי:' })),
+        h('p', { class: 'muted small-note' }, 'לחיצה על הכפתור פותחת אצל הנמען טיוטת מייל מוכנה, עם הכתובת, הנושא והטקסט שקבעת. הוא רק לוחץ "שלח". לחיצות על כפתור כזה לא נספרות בנתוני הגליון.'));
+      } else if (b.action === 'tel') {
+        box.replaceChildren(h('div', { class: 'fields' }, field('מספר טלפון לחיוג', inp('phone', 'tel', { class: 'ltr', placeholder: '02-1234567' }))),
+          h('p', { class: 'muted small-note' }, 'בטלפון, לחיצה על הכפתור פותחת את החייגן עם המספר. במחשב היא תלויה בתוכנה שמותקנת אצל הנמען.'));
+      } else if (b.action === 'wa') {
+        box.replaceChildren(h('div', { class: 'fields' }, field('מספר וואטסאפ', inp('phone', 'tel', { class: 'ltr', placeholder: '050-1234567' })),
+          field('הודעה מוכנה (לא חובה)', inp('waText', 'text', { placeholder: 'למשל: שלום, ראיתי את הגליון' }))),
+        h('p', { class: 'muted small-note' }, 'לחיצה פותחת שיחת וואטסאפ עם המספר, וההודעה כבר כתובה. מספר שמתחיל ב-0 מומר לקידומת ישראל (972).'));
+      } else {
+        box.replaceChildren(h('div', { class: 'fields' }, field('כתובת הקישור', h('input', { type: 'url', class: 'ltr', value: /^(mailto:|tel:)/i.test(b.href || '') ? 'https://' : (b.href || 'https://'), placeholder: 'https://', oninput: (e) => { b.href = e.target.value; changed(); } }))));
+      }
+    };
+    const kind = h('select', { onchange: () => {
+      b.action = kind.value;
+      if (b.action === 'link') b.href = /^https?:\/\//i.test(b.href || '') && !/^https:\/\/wa\.me\//i.test(b.href) ? b.href : 'https://'; else build();
+      draw(); changed();
+    } }, [['link', 'מעבר לקישור (אתר או דף)'], ['mail', 'שליחת מייל (פותח טיוטה מוכנה)'], ['tel', 'חיוג לטלפון'], ['wa', 'הודעת וואטסאפ']].map(([v, t]) => h('option', { value: v, selected: b.action === v }, t)));
+    draw();
+    return h('div', {}, field('מה קורה בלחיצה על הכפתור', kind), box);
+  }
+
   function blockBody(b) {
     switch (b.type) {
       case 'heading': return [field('טקסט הכותרת', input(b, 'text')), h('div', { class: 'fields' },
@@ -243,11 +296,10 @@ export async function mountBuilder(container, design, opts) {
         field('טקסט חלופי (alt)', input(b, 'alt')), field('קישור בלחיצה', input(b, 'href', 'url', { class: 'ltr' })),
         field('רוחב באחוזים', input(b, 'widthPct', 'number', { min: 10, max: 100 })), field('יישור', select(b, 'align', ALIGNS.slice(0, 3))),
         check(b, 'fullBleed', 'מקצה לקצה'))];
-      case 'button': return [h('div', { class: 'fields' }, field('טקסט', input(b, 'text')), field('קישור', input(b, 'href', 'url', { class: 'ltr' })),
+      case 'button': return [h('div', { class: 'fields' }, field('טקסט', input(b, 'text'))), buttonAction(b), h('div', { class: 'fields' },
         field('צבע רקע', input(b, 'bg', 'color', { value: b.bg || design.settings.btnBg })), field('צבע טקסט', input(b, 'color', 'color', { value: b.color || design.settings.btnColor })),
         field('עיגול פינות', input(b, 'radius', 'number', { min: 0, max: 40, value: b.radius ?? design.settings.btnRadius })), field('יישור', select(b, 'align', ALIGNS.slice(0, 3))),
-        field('גודל', select(b, 'size', [['', 'רגיל'], ['s', 'קטן'], ['l', 'גדול']]))), check(b, 'full', 'כפתור לכל רוחב הגליון'),
-        h('p', { class: 'muted small-note' }, 'קישור יכול להיות כתובת אתר, mailto:כתובת@מייל לשליחת מייל, או tel:מספר לחיוג.')];
+        field('גודל', select(b, 'size', [['', 'רגיל'], ['s', 'קטן'], ['l', 'גדול']]))), check(b, 'full', 'כפתור לכל רוחב הגליון')];
       case 'columns': return [...b.cols.map((c, i) => h('div', { style: 'margin-bottom:10px' }, h('label', {}, i === 0 ? 'טור ימני' : 'טור שמאלי'), imageField(c), field('טקסט חלופי לתמונה', input(c, 'alt')), richText(c))),
         check(b, 'reverseMobile', 'בנייד: להציג את הטור השמאלי ראשון')];
       case 'divider': return [h('div', { class: 'fields' }, field('צבע הקו', input(b, 'color', 'color')))];
