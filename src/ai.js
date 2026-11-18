@@ -18,8 +18,11 @@ const explain = (status, apiMessage) => {
 /** מנקה מפתח שהודבק: רווחים, ירידות שורה, מירכאות ותווי כיווניות נסתרים שנדבקים בהעתקה מדף בעברית. */
 export const cleanKey = (key) => String(key || '').replace(/[\s"'`\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '');
 
-async function once(key, path, body, inQuery) {
-  const url = `${base()}/v1beta/${path}${inQuery ? `${path.includes('?') ? '&' : '?'}key=${encodeURIComponent(key)}` : ''}`;
+const vertexBase = () => (process.env.VERTEX_BASE || 'https://aiplatform.googleapis.com').replace(/\/+$/, '');
+
+// vertex=true: מפתח של Vertex AI (Agent Platform), שפונה לכתובת אחרת של Google
+async function once(key, path, body, inQuery, vertex) {
+  const url = `${vertex ? vertexBase() + '/v1' : base() + '/v1beta'}/${path}${inQuery ? `${path.includes('?') ? '&' : '?'}key=${encodeURIComponent(key)}` : ''}`;
   let res;
   try {
     res = await fetch(url, {
@@ -36,10 +39,10 @@ async function once(key, path, body, inQuery) {
 }
 
 // המפתח נשלח בכותרת. אם Google דוחה את הזיהוי, מנסים פעם אחת גם בפרמטר key, כי לא כל סוגי המפתחות מתקבלים באותה דרך
-async function call(key, path, body) {
-  let r = await once(key, path, body, false);
+async function call(key, path, body, vertex = false) {
+  let r = await once(key, path, body, false, vertex);
   if ([400, 401, 403].includes(r.res.status) && /key|credential|auth|token|unauthenticated/i.test(JSON.stringify(r.data || ''))) {
-    const alt = await once(key, path, body, true);
+    const alt = await once(key, path, body, true, vertex);
     if (alt.res.ok) r = alt;
   }
   if (!r.res.ok) {
@@ -86,31 +89,51 @@ export function rankModels(models) {
 }
 
 /** שיחה אחת. messages: [{role:'user'|'model', text}]. מחזיר טקסט. */
-export async function generate(key, model, { system = '', messages, maxTokens = 4096, temperature = 0.7 }) {
+export async function generate(key, model, { system = '', messages, maxTokens = 4096, temperature = 0.7 }, vertex = false) {
   const contents = messages.map((m) => ({ role: m.role === 'model' ? 'model' : 'user', parts: [{ text: String(m.text) }] }));
   const body = { contents, generationConfig: { temperature, maxOutputTokens: maxTokens } };
   // Gemma לא מקבל הנחיית מערכת נפרדת, ולכן ההנחיה נכנסת לתחילת ההודעה הראשונה
   if (system && model.startsWith('gemma')) contents[0].parts[0].text = `${system}\n\n${contents[0].parts[0].text}`;
   else if (system) body.systemInstruction = { parts: [{ text: system }] };
-  const d = await call(key, `models/${encodeURIComponent(model)}:generateContent`, body);
+  const d = await call(key, `${vertex ? 'publishers/google/' : ''}models/${encodeURIComponent(model)}:generateContent`, body, vertex);
   if (d.promptFeedback?.blockReason) throw new AiError('Google חסם את הבקשה (' + d.promptFeedback.blockReason + '). נסה ניסוח אחר.', 422);
   const text = (d.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('').trim();
-  if (!text) throw new AiError('המנוע לא החזיר תשובה' + (d.candidates?.[0]?.finishReason ? ` (${d.candidates[0].finishReason})` : '') + '. נסה שוב או בחר מנוע אחר.', 502);
+  if (!text) throw Object.assign(new AiError('המנוע לא החזיר תשובה' + (d.candidates?.[0]?.finishReason ? ` (${d.candidates[0].finishReason})` : '') + '. נסה שוב או בחר מנוע אחר.', 502), { empty: true });
   return text;
 }
 
 // כינויים קבועים של Google למנוע העדכני. משמשים כשאי אפשר לקבל את רשימת המנועים
 const FALLBACK = ['gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-pro-latest'].map((id) => ({ id, name: id, family: 'gemini', guessed: true }));
+// ב-Vertex AI עם מפתח אין בקשה שמחזירה את רשימת המנועים, ולכן מנסים שמות מוכרים, מהחדש לישן
+const VERTEX_TRY = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
+
+/** בודק אם המפתח הוא מפתח של Vertex AI: מנסה בקשה זעירה מול כל שם מנוע מוכר, עד הראשון שעובד. */
+async function probeVertex(key, preferred) {
+  let last = null;
+  for (const id of [...new Set([preferred, ...VERTEX_TRY].filter(Boolean))]) {
+    try { await generate(key, id, { messages: [{ role: 'user', text: 'hi' }], maxTokens: 64, temperature: 0 }, true); return { id }; } catch (e) {
+      if (e.empty) return { id }; // המנוע ענה בלי טקסט: המפתח והמנוע תקינים
+      last = e;
+      if (e.http === 429) return { id, error: e }; // המפתח מזוהה, אבל המכסה נגמרה
+      if (![404, 400].includes(e.http)) break; // דחייה של המפתח עצמו: אין טעם לנסות שמות נוספים
+    }
+  }
+  return { id: null, error: last };
+}
 
 const cache = new Map(); // מפתח → { at, models }
-async function modelsFor(key) {
+async function modelsFor(key, preferred = '') {
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.models;
+  if (hit && Date.now() - hit.at < (hit.models.vertex ? 60 : 10) * 60 * 1000) return hit.models;
   let models;
   try { models = rankModels(await listModels(key)); } catch (e) {
-    // יש מפתחות שמורשים להפיק טקסט אבל לא לקרוא את רשימת המנועים. מפתח שגוי ממש ייכשל גם בניסיון ההפקה
+    // מפתח שגוי ממש נכשל גם בהמשך. מפתח תקין שנחסם כאן הוא בדרך כלל מפתח של Vertex AI, או מפתח שלא מורשה לרשימת המנועים
     if (![401, 403, 404].includes(e.http)) throw e;
-    models = FALLBACK; models.listError = e.detail || e.message;
+    const v = await probeVertex(key, preferred);
+    if (v.id) {
+      models = [v.id, ...VERTEX_TRY.filter((x) => x !== v.id)].map((id) => ({ id, name: id, family: 'gemini', guessed: id !== v.id }));
+      models.vertex = true;
+    } else { models = [...FALLBACK]; models.listError = e.detail || e.message; models.vertexError = v.error?.detail || ''; }
   }
   if (cache.size > 5) cache.clear();
   cache.set(key, { at: Date.now(), models });
@@ -124,12 +147,13 @@ async function modelsFor(key) {
 export async function ask(rawKey, chosen, request) {
   const key = cleanKey(rawKey);
   if (!key) throw new AiError('לא הוגדר מפתח של Google AI Studio. מנהל יכול להוסיף אותו במסך ההגדרות.', 400);
-  if (chosen) return { model: chosen, text: await generate(key, chosen, request) };
-  const models = await modelsFor(key);
+  const models = await modelsFor(key, chosen);
+  const vertex = !!models.vertex;
+  if (chosen) return { model: chosen, vertex, text: await generate(key, chosen, request, vertex) };
   if (!models.length) throw new AiError('המפתח תקין, אבל לא נמצא בו מנוע שמפיק טקסט.', 400);
   let last;
   for (const m of models.slice(0, 3)) {
-    try { return { model: m.id, text: await generate(key, m.id, request) }; } catch (e) {
+    try { return { model: m.id, vertex, text: await generate(key, m.id, request, vertex) }; } catch (e) {
       last = e;
       if (![404, 429, 400].includes(e.http) && !models.listError) throw e;
     }
@@ -144,13 +168,13 @@ export async function testKey(rawKey, chosen) {
   const cleaned = key !== String(rawKey || '');
   cache.delete(key);
   let models;
-  try { models = await modelsFor(key); } catch (e) { return { ok: false, models: [], error: e.message, detail: e.detail || '', format, cleaned }; }
+  try { models = await modelsFor(key, chosen); } catch (e) { return { ok: false, models: [], error: e.message, detail: e.detail || '', format, cleaned }; }
   const started = Date.now();
   let reply = null; let error = ''; let detail = ''; let used = chosen || '';
-  try { const r = await ask(key, chosen, { messages: [{ role: 'user', text: 'ענה במילה אחת: שלום' }], maxTokens: 256, temperature: 0 }); reply = r.text.slice(0, 60); used = r.model; } catch (e) { error = e.message; detail = e.detail || ''; }
-  const listed = models.listError ? [] : models;
+  try { const r = await ask(key, chosen, { messages: [{ role: 'user', text: 'ענה במילה אחת: שלום' }], maxTokens: 1024, temperature: 0 }); reply = r.text.slice(0, 60); used = r.model; } catch (e) { error = e.message; detail = e.detail || ''; }
+  const listed = models.listError || models.vertex ? [] : models;
   return { ok: !error, models: (error && models.listError ? [] : models).map((m) => ({ id: m.id, name: m.name, family: m.family })), listed: listed.length,
-    listError: models.listError || '', auto: models[0]?.id || '', used, reply, error, detail, format: !error && format.startsWith('פורמט לא') ? '' : format, cleaned, ms: Date.now() - started };
+    vertex: !!models.vertex, vertexError: models.vertexError || '', listError: models.listError || '', auto: models[0]?.id || '', used, reply, error, detail, format: !error && format.startsWith('פורמט לא') ? '' : format, cleaned, ms: Date.now() - started };
 }
 
 const ALLOWED = new Set(['p', 'br', 'b', 'strong', 'i', 'em', 'u', 'a', 'ul', 'ol', 'li']);
