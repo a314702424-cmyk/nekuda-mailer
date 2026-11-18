@@ -749,10 +749,13 @@ async function settingsPage() {
           model.replaceChildren(h('option', { value: '' }, r.auto ? `בחירה אוטומטית (כרגע: ${r.auto})` : 'בחירה אוטומטית (מומלץ)'),
             ...r.models.map((m) => h('option', { value: m.id, selected: m.id === keep }, `${m.name} · ${m.id}`)));
           status.className = 'ai-status ' + (r.ok ? 'good' : 'bad');
-          status.replaceChildren(h('b', {}, r.ok ? '✔ המפתח תקין והעוזר עובד' : r.models.length ? '✖ המפתח מזוהה, אבל בקשת הניסיון נכשלה' : '✖ המפתח לא עובד'), h('br'),
+          status.replaceChildren(...[h('b', {}, r.ok ? '✔ המפתח תקין והעוזר עובד' : r.models.length ? '✖ המפתח מזוהה, אבל בקשת הניסיון נכשלה' : '✖ המפתח לא עובד'), h('br'),
             r.models.length ? `נמצאו ${r.models.length} מנועים זמינים למפתח (${r.models.filter((m) => m.family === 'gemini').length} Gemini, ${r.models.filter((m) => m.family === 'gemma').length} Gemma). ` : '',
             r.ok ? `המנוע שנבדק: ${r.used}. התשובה חזרה תוך ${(r.ms / 1000).toFixed(1)} שניות.` : (r.error || ''),
-            r.ok && key.value ? h('div', {}, 'לא לשכוח ללחוץ "שמירת הגדרות" כדי לשמור את המפתח.') : null);
+            r.format ? h('div', { class: 'muted' }, r.format + (r.cleaned ? '. הוסרו מהמפתח רווחים או תווים נסתרים שנדבקו בהעתקה.' : '')) : null,
+            r.listError ? h('div', { class: 'muted' }, 'רשימת המנועים לא התקבלה, ולכן נעשה ניסיון עם המנוע העדכני של Google.') : null,
+            !r.ok && (r.detail || r.listError) ? h('div', { class: 'ltr muted', style: 'margin-top:6px;font-size:12px' }, 'התשובה מ-Google: ' + (r.detail || r.listError)) : null,
+            r.ok && key.value ? h('div', {}, 'לא לשכוח ללחוץ "שמירת הגדרות" כדי לשמור את המפתח.') : null].filter(Boolean));
         } catch (e) { status.className = 'ai-status bad'; status.textContent = '✖ ' + e.message; } finally { test.disabled = false; }
       } }, 'בדיקת המפתח');
       return h('div', { class: 'card' }, h('h2', {}, 'עוזר AI (Google AI Studio)'),
