@@ -1,4 +1,4 @@
-import { defaultDesign } from './shared/render.js';
+import { defaultDesign, htmlToText } from './shared/render.js';
 import { mountBuilder, h } from './builder.js';
 import { PERM_GROUPS } from './shared/perms.js';
 
@@ -214,6 +214,7 @@ async function campaignPage(id) {
     if (mode === 'blocks') {
       builder = await mountBuilder(body, design, {
         upload, blocks: store, notify: toast, onChange: touch, lists: state.lists,
+        ai: state.meta.ai ? safe((req) => api('POST', '/ai', req)) : null,
         meta: () => ({ subject: subject.value, preheader: preheader.value }),
         saveBrand: safe((settings) => api('PUT', '/brand', settings)),
       });
@@ -260,6 +261,43 @@ async function campaignPage(id) {
     toast('בשרת לא מותקן Chrome. נפתחת תצוגה מלאה, ומשם אפשר להדפיס ולבחור "שמירה כ-PDF".');
     window.open(`/api/campaigns/${id}/preview`, '_blank');
   });
+
+  const aiDialog = () => {
+    if (!state.meta.ai) { toast('עוזר ה-AI עדיין לא מופעל. מנהל צריך להזין מפתח של Google AI Studio במסך ההגדרות.', true); return; }
+    const ctx = () => (mode === 'blocks' && builder ? builder.text() : htmlToText(htmlArea.value)).slice(0, 7000);
+    const out = h('div');
+    const prompt = h('textarea', { style: 'min-height:80px', placeholder: 'למשל: גליון לקראת חנוכה, עם הזמנה לערב עיון ביום שלישי ותזכורת על שעות הפעילות' });
+    const busy = async (btn, fn) => { const old = btn.textContent; btn.disabled = true; btn.textContent = 'חושב…'; try { await fn(); } catch (e) { toast(e.message, true); } finally { btn.disabled = false; btn.textContent = old; } };
+    const used = (r) => h('p', { class: 'muted small-note' }, 'המנוע: ' + r.model);
+    dialog('✨ עוזר AI', h('div', {},
+      field('הנחיה או שאלה (לא חובה להצעות נושא)', prompt),
+      h('div', { class: 'row', style: 'margin-top:10px' },
+        h('button', { onclick: (e) => busy(e.target, async () => {
+          const r = await api('POST', '/ai', { action: 'subjects', context: ctx(), prompt: prompt.value });
+          out.replaceChildren(h('p', { class: 'muted' }, 'לחיצה על הצעה ממלאת את הנושא ואת התקציר:'),
+            ...r.subjects.map((x) => h('button', { class: 'ai-opt', onclick: () => { subject.value = x.subject; if (x.preheader) preheader.value = x.preheader; touch(); builder?.refresh(); toast('הנושא והתקציר עודכנו'); } }, x.subject, h('small', {}, x.preheader))), used(r));
+        }) }, 'הצעות לנושא ולתקציר'),
+        mode === 'blocks' ? h('button', { onclick: (e) => busy(e.target, async () => {
+          const r = await api('POST', '/ai', { action: 'draft', prompt: prompt.value });
+          const add = (replace) => {
+            const footers = design.blocks.filter((b) => b.type === 'footer');
+            const rest = replace ? [] : design.blocks.filter((b) => b.type !== 'footer');
+            design.blocks.splice(0, design.blocks.length, ...rest, ...r.blocks, ...footers);
+            if (replace && r.subject) { subject.value = r.subject; preheader.value = r.preheader || ''; }
+            builder.reload(); touch(); toast('הטיוטה נכנסה לגליון. אפשר לבטל בכפתור "בטל"'); document.querySelector('dialog')?.close();
+          };
+          out.replaceChildren(h('p', {}, h('b', {}, r.subject || 'טיוטה'), ` · ${r.blocks.length} בלוקים`),
+            h('div', { class: 'ai-answer' }, r.blocks.map((b) => (b.type === 'heading' ? `# ${b.text}` : b.type === 'button' ? `[כפתור: ${b.text}]` : b.type === 'divider' ? '———' : htmlToText(b.html))).join('\n\n')),
+            h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: 'primary', onclick: () => add(false) }, 'הוספה לסוף הגליון'),
+              h('button', { onclick: () => { if (window.confirm('להחליף את כל תוכן הגליון בטיוטה? התחתית תישאר.')) add(true); } }, 'החלפת התוכן הקיים')), used(r));
+        }) }, 'טיוטת גליון מההנחיה') : null,
+        h('button', { onclick: (e) => busy(e.target, async () => {
+          const r = await api('POST', '/ai', { action: 'chat', prompt: prompt.value, context: ctx() });
+          out.replaceChildren(h('div', { class: 'ai-answer' }, r.answer), used(r));
+        }) }, 'שאלה על הגליון')),
+      h('p', { class: 'muted small-note' }, 'לעזרה בבלוק טקסט מסוים (ניסוח, קיצור, הגהה) יש תפריט "✨ עוזר AI" בסרגל של כל בלוק טקסט. כדאי לקרוא כל טקסט שהעוזר כתב לפני שליחה: הוא עלול לטעות בעובדות.'),
+      out), (close) => [h('button', { onclick: close }, 'סגירה')]);
+  };
 
   const runCheck = safe(async () => {
     await save(true);
@@ -315,7 +353,7 @@ async function campaignPage(id) {
 
   shell([
     h('div', { class: 'bar' }, h('h1', {}, 'עריכת גליון'), saveState, tag(CAMP_STATUS, c.status), modeBtn,
-      h('button', { onclick: versions }, 'גרסאות'), h('button', { onclick: fullPreview }, 'תצוגה מלאה'), h('button', { onclick: downloadPdf }, 'הורד כ-PDF'), h('button', { onclick: runCheck }, 'בדיקה'),
+      h('button', { onclick: versions }, 'גרסאות'), h('button', { onclick: aiDialog }, '✨ עוזר AI'), h('button', { onclick: fullPreview }, 'תצוגה מלאה'), h('button', { onclick: downloadPdf }, 'הורד כ-PDF'), h('button', { onclick: runCheck }, 'בדיקה'),
       h('button', { onclick: sendTest }, 'שליחת בדיקה'), h('button', { onclick: safe(() => save(false, true)) }, 'שמירה'),
       c.auto ? h('a', { class: 'btn primary', href: '#/automations' }, 'לאוטומציות')
       : c.status === 'scheduled'
@@ -698,6 +736,30 @@ async function settingsPage() {
       field('כתובת לקפיצות (Return-Path). המערכת מוסיפה לה מזהה נמען אחרי סימן +', inp('bounceAddress', { class: 'ltr', placeholder: 'bounce@example.org' })),
       field('כתובת פיזית של העסק (מופיעה בתחתית אוטומטית)', inp('companyAddress')),
       ),
+    (() => {
+      const key = h('input', { type: 'password', autocomplete: 'new-password', class: 'ltr', placeholder: s.hasAiKey ? 'מפתח שמור. להשאיר ריק כדי לא לשנות' : 'מפתח מ-Google AI Studio' });
+      const model = h('select', {}, h('option', { value: '' }, 'בחירה אוטומטית (מומלץ)'), s.aiModel ? h('option', { value: s.aiModel, selected: true }, s.aiModel) : null);
+      f.aiKey = key; f.aiModel = model;
+      const status = h('div', { class: 'ai-status' }, s.hasAiKey ? 'יש מפתח שמור. לחיצה על "בדיקת המפתח" בודקת שהוא עובד.' : 'עדיין לא הוזן מפתח.');
+      const test = h('button', { type: 'button', onclick: async () => {
+        test.disabled = true; status.className = 'ai-status'; status.textContent = 'בודק את המפתח מול Google…';
+        try {
+          const r = await api('POST', '/ai/test', { key: key.value, model: model.value });
+          const keep = model.value;
+          model.replaceChildren(h('option', { value: '' }, r.auto ? `בחירה אוטומטית (כרגע: ${r.auto})` : 'בחירה אוטומטית (מומלץ)'),
+            ...r.models.map((m) => h('option', { value: m.id, selected: m.id === keep }, `${m.name} · ${m.id}`)));
+          status.className = 'ai-status ' + (r.ok ? 'good' : 'bad');
+          status.replaceChildren(h('b', {}, r.ok ? '✔ המפתח תקין והעוזר עובד' : r.models.length ? '✖ המפתח מזוהה, אבל בקשת הניסיון נכשלה' : '✖ המפתח לא עובד'), h('br'),
+            r.models.length ? `נמצאו ${r.models.length} מנועים זמינים למפתח (${r.models.filter((m) => m.family === 'gemini').length} Gemini, ${r.models.filter((m) => m.family === 'gemma').length} Gemma). ` : '',
+            r.ok ? `המנוע שנבדק: ${r.used}. התשובה חזרה תוך ${(r.ms / 1000).toFixed(1)} שניות.` : (r.error || ''),
+            r.ok && key.value ? h('div', {}, 'לא לשכוח ללחוץ "שמירת הגדרות" כדי לשמור את המפתח.') : null);
+        } catch (e) { status.className = 'ai-status bad'; status.textContent = '✖ ' + e.message; } finally { test.disabled = false; }
+      } }, 'בדיקת המפתח');
+      return h('div', { class: 'card' }, h('h2', {}, 'עוזר AI (Google AI Studio)'),
+        h('p', { class: 'muted' }, 'המפתח נוצר בחינם ב-aistudio.google.com, בלחיצה על "Get API key". המערכת מזהה לבד אילו מנועים המפתח מאפשר (Gemini לכל סוגיו וגם Gemma), ובוחרת את המתאים. אפשר גם לבחור מנוע מסוים אחרי בדיקת המפתח. השימוש מחויב לפי התנאים של Google לחשבון שלך.'),
+        h('div', { class: 'row' }, h('div', { class: 'grow' }, field('מפתח API', key)), h('div', { class: 'grow' }, field('מנוע', model)), h('div', {}, field('\u00a0', test))),
+        status);
+    })(),
     h('div', { class: 'card' }, h('h2', {}, 'שדות מותאמים לנמען'),
       h('p', { class: 'muted' }, 'שורה לכל שדה, בצורה מפתח:כותרת. המפתח באנגלית קטנה בלי רווחים. למשל city:עיר. בגליון כותבים {{city}} והמערכת מחליפה אותו בערך של כל נמען. את הערכים ממלאים בחלון עריכת הנמען. השינוי ייראה במסכים אחרי רענון הדף.'),
       (f.customFields = h('textarea', { class: 'ltr-mixed', value: s.customFields || '', style: 'min-height:70px', placeholder: 'city:עיר\ncompany:חברה' }))),
@@ -739,6 +801,7 @@ async function settingsPage() {
       const body = {};
       for (const [k, el] of Object.entries(f)) body[k] = el.value;
       await api('PUT', '/settings', body);
+      state.meta = await api('GET', '/meta');
       toast('ההגדרות נשמרו');
     }) }, 'שמירת הגדרות'),
     h('div', { class: 'card', style: 'margin-top:20px' }, h('h2', {}, 'החלפת סיסמה'),

@@ -28,7 +28,7 @@ const field = (label, control) => h('div', {}, h('label', {}, label), control);
  * opts: upload(file), meta(), onChange(), saveBrand(settings), blocks: { list, save, update, remove }, notify(msg, bad)
  */
 export async function mountBuilder(container, design, opts) {
-  const { upload, meta, onChange, saveBrand, blocks: store, notify = () => {}, lists: allLists = [] } = opts;
+  const { upload, meta, onChange, saveBrand, blocks: store, notify = () => {}, lists: allLists = [], ai = null } = opts;
   let saved = store ? await store.list() : [];
   const syncedMap = () => Object.fromEntries(saved.filter((b) => b.synced).map((b) => [b.id, b.block]));
 
@@ -153,6 +153,23 @@ export async function mountBuilder(container, design, opts) {
     } }, h('option', { value: '' }, 'גודל'), [12, 14, 16, 18, 20, 24, 28, 34].map((n) => h('option', { value: n }, n)));
     const face = h('select', { title: 'גופן לטקסט המסומן', onchange: () => { if (face.value) run('fontName', face.value); face.value = ''; } },
       h('option', { value: '' }, 'גופן'), FONTS.map(([v, t]) => h('option', { value: v }, t)));
+    const aiMenu = h('select', { class: 'ai-menu', title: 'עוזר AI לבלוק הזה', onchange: async () => {
+      const mode = aiMenu.value; aiMenu.value = '';
+      if (!mode) return;
+      const has = plain(area.innerHTML);
+      let prompt = '';
+      if (mode === 'write' || mode === 'custom') {
+        prompt = window.prompt(mode === 'write' ? 'על מה לכתוב? אפשר לפרט נקודות, אורך וסגנון:' : 'מה לעשות עם הטקסט? למשל: "הפוך לרשימת נקודות":', '') || '';
+        if (!prompt.trim()) return;
+      } else if (!has) { notify('הבלוק ריק. קודם כותבים טקסט, או בוחרים "כתוב לפי הנחיה"', true); return; }
+      aiMenu.disabled = true; area.classList.add('busy');
+      try {
+        const r = await ai(mode === 'write' ? { action: 'write', prompt, context: plain(design.blocks.map((x) => x.text || x.html || '').join(' ')).slice(0, 4000) }
+          : { action: 'rewrite', mode: mode === 'custom' ? '' : mode, prompt, text: area.innerHTML });
+        if (r && r.html) { area.innerHTML = r.html; sync(); notify('הטקסט עודכן. אפשר לבטל בכפתור "בטל" למעלה'); }
+      } finally { aiMenu.disabled = false; area.classList.remove('busy'); }
+    } }, h('option', { value: '' }, '✨ עוזר AI'), [['write', 'כתוב לפי הנחיה…'], ['improve', 'שפר ניסוח'], ['shorten', 'קצר'], ['lengthen', 'הרחב'], ['proofread', 'הגהה בלבד'],
+      ['formal', 'רשמי יותר'], ['friendly', 'חם ואישי יותר'], ['custom', 'הנחיה חופשית…']].map(([v, t]) => h('option', { value: v }, t)));
     const tools = h('div', { class: 'rte-tools' },
       btn('B', 'מודגש', () => run('bold'), 'font-weight:bold'), btn('I', 'נטוי', () => run('italic'), 'font-style:italic'), btn('U', 'קו תחתון', () => run('underline'), 'text-decoration:underline'),
       face, size,
@@ -172,7 +189,8 @@ export async function mountBuilder(container, design, opts) {
       btn('ימין', 'יישור לימין', () => run('justifyRight')), btn('מרכז', 'יישור למרכז', () => run('justifyCenter')), btn('שמאל', 'יישור לשמאל', () => run('justifyLeft')),
       btn('שם הנמען', 'הוספת שם הנמען', () => run('insertText', '{{name}}')),
       btn('שם פרטי', 'הוספת השם הפרטי', () => run('insertText', '{{first_name}}')),
-      btn('נקה עיצוב', 'הסרת עיצוב מהטקסט המסומן', () => run('removeFormat')));
+      btn('נקה עיצוב', 'הסרת עיצוב מהטקסט המסומן', () => run('removeFormat')),
+      ai ? aiMenu : null);
     return h('div', {}, tools, area);
   }
 
@@ -361,5 +379,5 @@ export async function mountBuilder(container, design, opts) {
 
   container.replaceChildren(h('div', { class: 'builder' }, h('div', { class: 'b-side' }, settingsBox, palette, list), preview));
   drawAll();
-  return { getDesign: () => design, refresh, syncedMap };
+  return { getDesign: () => design, refresh, syncedMap, reload: () => { drawBlocks(); changed(); }, text: () => design.blocks.map((b) => plain(b.text || b.html || (b.cols || []).map((c) => c.html).join(' ') || b.question || '')).filter(Boolean).join('\n') };
 }

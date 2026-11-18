@@ -142,3 +142,13 @@ pre.code{direction:ltr;text-align:left;background:#f4f6fa;border:1px solid var(-
 
 /* גרסה 0.6.0 */
 .vis select.cond{width:auto;max-width:220px;padding:3px 6px;font-size:13px}
+
+/* גרסה 0.7.0 */
+.rte-tools select.ai-menu{max-width:130px;border-color:var(--brand);color:var(--brand);font-weight:bold}
+.rte.busy{opacity:.5;pointer-events:none}
+.ai-status{margin-top:10px;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:#f8fafc}
+.ai-status.good{border-color:#86d1a0;background:#effaf2}
+.ai-status.bad{border-color:#f0b4ae;background:#fdf1f0}
+.ai-opt{display:block;width:100%;text-align:right;margin-bottom:8px;padding:10px 12px;white-space:normal;height:auto}
+.ai-opt small{display:block;color:var(--muted);font-weight:normal;margin-top:2px}
+.ai-answer{white-space:pre-wrap;background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:12px;margin-top:10px;max-height:300px;overflow:auto}
