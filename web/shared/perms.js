@@ -27,6 +27,8 @@ const RULES = [
   [/^\/campaigns\/:id\/(stats|people|people\.csv)$/, 'stats.view'],
   [/^\/campaigns\/:id\/check$/, 'campaigns.view'],
   [/^\/campaigns/, { GET: 'campaigns.view', DELETE: 'campaigns.delete', _: 'campaigns.edit' }],
+  [/^\/ai\/test$/, 'settings.manage'],
+  [/^\/ai$/, 'campaigns.edit'],
   [/^\/queue$/, 'campaigns.view'],
   [/^\/automations/, { GET: 'campaigns.view', _: 'campaigns.send' }],
 ];
