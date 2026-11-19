@@ -78,6 +78,8 @@ export const DEFAULT_SETTINGS = {
   formColor: '#1b4fd8',
   formLogo: '',
   formAskName: '1',
+  pauseShabbat: '0',
+  pauseRanges: '[]',
   privacyText: '',
   customFields: '',
   aiKey: '',
@@ -108,6 +110,7 @@ export function openDb(dataDir) {
       ALTER TABLE campaigns ADD COLUMN subject_b TEXT NOT NULL DEFAULT '';
       ALTER TABLE campaigns ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';`);
   }
+  if (!hasCol('campaigns', 'archive_html')) raw.exec('ALTER TABLE campaigns ADD COLUMN archive_html TEXT');
   if (!hasCol('deliveries', 'variant')) raw.exec("ALTER TABLE deliveries ADD COLUMN variant TEXT NOT NULL DEFAULT ''");
   raw.exec(`CREATE TABLE IF NOT EXISTS automations(
       id INTEGER PRIMARY KEY, name TEXT NOT NULL, list_id INTEGER NOT NULL, campaign_id INTEGER NOT NULL,

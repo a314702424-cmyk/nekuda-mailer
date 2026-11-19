@@ -3,7 +3,10 @@ import { html, send, redirect, clientIp, parseCookies } from './http.js';
 import { startSession } from './api.js';
 import { now } from './db.js';
 import { esc } from '../web/shared/render.js';
-import { readToken, makeToken, personalize } from './track.js';
+import { readToken, makeToken, personalize, campaignHtml } from './track.js';
+import { htmlToPdf } from './pdf.js';
+import fs from 'node:fs';
+import path from 'node:path';
 import { buildMessage, SmtpConnection, smtpOptions } from './mailer.js';
 import { isEmail } from './csv.js';
 
@@ -245,19 +248,64 @@ ${s.replyTo || s.fromEmail || ''}${s.companyAddress ? '\n' + s.companyAddress : 
   });
 
   // ---------- ארכיון ציבורי ----------
+  // הגרסה הציבורית של גליון: מה שנערך לארכיון אם יש, אחרת מה שנשלח. נמען 0, כך שקישורי המעקב וההסרה לא משויכים לאף אחד
+  const publicHtml = (c) => {
+    const baseUrl = db.setting('baseUrl').replace(/\/+$/, '');
+    const src = c.archive_html || c.prepared_html || campaignHtml(c, db);
+    return personalize(src, { baseUrl, token: makeToken(secret(), c.id, 0), subscriber: { id: 0, email: '', name: '' }, isHtml: true });
+  };
+  const pdfBusy = new Map();
+  /** PDF של גליון. נשמר בדיסק לפי תוכן הגליון, כך ש-Chrome מופעל פעם אחת לכל גרסה ולא לכל הורדה. */
+  async function campaignPdf(c) {
+    const page0 = publicHtml(c).replace(/<\/head>/i, '<style>@page{size:A4;margin:10mm}body{-webkit-print-color-adjust:exact;print-color-adjust:exact}</style></head>');
+    const dir = path.join(db.dataDir, 'pdf-cache');
+    const file = path.join(dir, `${c.id}-${crypto.createHash('sha1').update(page0).digest('hex').slice(0, 16)}.pdf`);
+    if (fs.existsSync(file)) return fs.readFileSync(file);
+    if (!pdfBusy.has(file)) {
+      pdfBusy.set(file, (async () => {
+        const pdf = await htmlToPdf(page0);
+        if (pdf) {
+          fs.mkdirSync(dir, { recursive: true });
+          for (const old of fs.readdirSync(dir)) if (old.startsWith(`${c.id}-`)) fs.rmSync(path.join(dir, old), { force: true });
+          fs.writeFileSync(file, pdf);
+        }
+        return pdf;
+      })().finally(() => pdfBusy.delete(file)));
+    }
+    return pdfBusy.get(file);
+  }
+  const sendPdf = async (res, c) => {
+    let pdf = null;
+    try { pdf = await campaignPdf(c); } catch { pdf = null; }
+    if (!pdf) return html(res, page('הורדת PDF', '<h1>ההורדה לא זמינה כרגע</h1><p>אפשר לפתוח את הגליון בדפדפן ולהדפיס אותו ל-PDF.</p>'), 503);
+    send(res, 200, pdf, { 'Content-Type': 'application/pdf', 'Content-Length': pdf.length, 'Content-Disposition': `attachment; filename="newsletter-${c.id}.pdf"`, 'Cache-Control': 'private, max-age=300' });
+  };
+
+  // כפתור "הורד כ-PDF" בתוך גליון: הקישור נושא את האסימון של הנמען
+  router.add('GET', '/pdf/:token', async ({ res, params }) => {
+    const ids = readToken(secret(), params.token);
+    const c = ids && ids.campaignId > 0 && db.get('SELECT * FROM campaigns WHERE id=?', ids.campaignId);
+    if (!c) return html(res, page('הורדת PDF', '<h1>הקישור לא תקין</h1>'), 400);
+    await sendPdf(res, c);
+  });
+
   router.add('GET', '/archive', ({ res }) => {
     if (db.setting('archiveEnabled') !== '1') return html(res, page('ארכיון', '<h1>הדף לא נמצא</h1>'), 404);
     const rows = db.all("SELECT id, subject, COALESCE(finished_at, started_at) at FROM campaigns WHERE public=1 AND status='sent' AND prepared_html IS NOT NULL ORDER BY at DESC LIMIT 300");
     const title = db.setting('archiveTitle') || 'ארכיון הגליונות';
-    html(res, page(title, `<h1>${esc(title)}</h1>${rows.length ? `<ul class="arch">${rows.map((r) => `<li><a href="/archive/${r.id}">${esc(r.subject || '(ללא נושא)')}</a><small>${new Date(r.at * 1000).toLocaleDateString('he-IL')}</small></li>`).join('')}</ul>` : '<p>עדיין אין גליונות בארכיון.</p>'}
+    html(res, page(title, `<h1>${esc(title)}</h1>${rows.length ? `<ul class="arch">${rows.map((r) => `<li><a href="/archive/${r.id}">${esc(r.subject || '(ללא נושא)')}</a><small>${new Date(r.at * 1000).toLocaleDateString('he-IL')} · <a href="/archive/${r.id}/pdf">הורדה כ-PDF</a></small></li>`).join('')}</ul>` : '<p>עדיין אין גליונות בארכיון.</p>'}
       <p><a href="/subscribe">להרשמה לרשימת התפוצה</a></p>`));
   });
+  const archived = (id) => db.setting('archiveEnabled') === '1' && db.get("SELECT * FROM campaigns WHERE id=? AND public=1 AND status='sent'", Number(id) || 0);
   router.add('GET', '/archive/:id', ({ res, params }) => {
-    const c = db.setting('archiveEnabled') === '1' && db.get("SELECT id, prepared_html FROM campaigns WHERE id=? AND public=1 AND status='sent'", Number(params.id) || 0);
+    const c = archived(params.id);
     if (!c || !c.prepared_html) return html(res, page('הגליון לא נמצא', '<h1>הגליון לא נמצא</h1>'), 404);
-    const baseUrl = db.setting('baseUrl').replace(/\/+$/, '');
-    // נמען 0: קישורי המעקב וההסרה בעותק הציבורי לא משויכים לאף אחד
-    html(res, personalize(c.prepared_html, { baseUrl, token: makeToken(secret(), c.id, 0), subscriber: { id: 0, email: '', name: '' }, isHtml: true }));
+    html(res, publicHtml(c));
+  });
+  router.add('GET', '/archive/:id/pdf', async ({ res, params }) => {
+    const c = archived(params.id);
+    if (!c || !c.prepared_html) return html(res, page('הגליון לא נמצא', '<h1>הגליון לא נמצא</h1>'), 404);
+    await sendPdf(res, c);
   });
 
   // ---------- כניסה עם Google ----------

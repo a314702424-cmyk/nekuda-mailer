@@ -11,8 +11,18 @@ import { enqueueCampaign, sentToday, campaignAttachments } from './worker.js';
 import { buildMessage, SmtpConnection, smtpOptions } from './mailer.js';
 import { ALL_PERMS, permFor } from '../web/shared/perms.js';
 import { htmlToPdf, chromePath } from './pdf.js';
+import { pauseInfo, cleanRanges } from './pause.js';
+import { listBackups, createBackup, backupPath } from './backup.js';
 import { ask, testKey, cleanHtml, cleanKey, parseJson, AiError } from './ai.js';
 
+export const CONFIRM_DELETE = 'מאושר למחיקה';
+/** הגנה כפולה על מחיקה: רק מנהל מערכת, ורק אחרי הקלדת משפט האישור. */
+function guardDelete(user, typed) {
+  need(user.role === 'admin', 'רק מנהל מערכת יכול למחוק', 403);
+  let v = String(typed || '');
+  try { v = decodeURIComponent(v); } catch { /* נשאר כמו שהוא */ }
+  need(v.trim() === CONFIRM_DELETE, `כדי למחוק יש להקליד "${CONFIRM_DELETE}"`, 400);
+}
 const FIELD_KEY = /^[a-z][a-z0-9_]{1,20}$/;
 const RESERVED = ['name', 'first_name', 'email', 'unsubscribe_url', 'webview_url', 'preferences_url', 'base', 'token'];
 /** שדות מותאמים מוגדרים בהגדרות, שורה לכל שדה: מפתח:כותרת */
@@ -185,6 +195,7 @@ export function registerApi(router, { db, worker, version }) {
       dailyLimit: Number(db.setting('dailyLimit')) || 0,
       queue: Number(db.get("SELECT COUNT(*) n FROM deliveries WHERE status='pending'").n),
       worker: worker ? worker.state : null,
+      pause: pauseInfo(db.settings()),
       recent: user.can('campaigns.view') ? db.all('SELECT * FROM campaigns ORDER BY id DESC LIMIT 6').map((c) => campaignOut(db, c)) : [],
     });
   });
@@ -228,7 +239,8 @@ export function registerApi(router, { db, worker, version }) {
     });
     json(res, { ok: true });
   });
-  api('DELETE', '/users/:id', ({ res, params, user }) => {
+  api('DELETE', '/users/:id', ({ req, res, params, user }) => {
+    guardDelete(user, req.headers['x-confirm-delete']);
     const existing = db.get('SELECT * FROM users WHERE id=?', int(params.id));
     need(existing, 'המשתמש לא נמצא', 404);
     need(existing.id !== user.id, 'אי אפשר למחוק את החשבון שלך', 409);
@@ -270,7 +282,8 @@ export function registerApi(router, { db, worker, version }) {
     db.run('UPDATE lists SET name=?, description=?, color=? WHERE id=?', str(body.name, 120).trim(), str(body.description), str(body.color, 9) || '#4f6bed', int(params.id));
     json(res, { ok: true });
   });
-  api('DELETE', '/lists/:id', ({ res, params }) => {
+  api('DELETE', '/lists/:id', ({ req, res, params, user }) => {
+    guardDelete(user, req.headers['x-confirm-delete']);
     const id = int(params.id);
     db.tx(() => {
       db.run('DELETE FROM subscriptions WHERE list_id=?', id);
@@ -346,7 +359,7 @@ export function registerApi(router, { db, worker, version }) {
           db.run(`UPDATE subscribers SET status=?, unsubscribed_at=CASE WHEN ?='unsubscribed' THEN COALESCE(unsubscribed_at, ?) ELSE NULL END WHERE id IN (${ids})`, body.status, body.status, now(), ...p);
           break;
         case 'delete':
-          need(user.can('subscribers.delete'), 'אין לך הרשאה למחוק נמענים', 403);
+          guardDelete(user, body.confirm);
           // קודם הנמענים ורק אחר כך השיוכים, כי הסינון עצמו עשוי להישען על השיוך לרשימה
           db.run(`DELETE FROM subscribers WHERE id IN (${ids})`, ...p);
           db.run('DELETE FROM subscriptions WHERE subscriber_id NOT IN (SELECT id FROM subscribers)');
@@ -398,7 +411,8 @@ export function registerApi(router, { db, worker, version }) {
     });
   });
 
-  api('DELETE', '/subscribers/:id', ({ res, params }) => {
+  api('DELETE', '/subscribers/:id', ({ req, res, params, user }) => {
+    guardDelete(user, req.headers['x-confirm-delete']);
     const id = int(params.id);
     db.tx(() => {
       db.run('DELETE FROM subscriptions WHERE subscriber_id=?', id);
@@ -502,7 +516,14 @@ export function registerApi(router, { db, worker, version }) {
   api('GET', '/campaigns/:id', ({ res, params }) => json(res, campaignOut(db, getCampaign(params.id), true)));
   api('PUT', '/campaigns/:id', ({ res, body, params }) => {
     const c = getCampaign(params.id);
-    need(['draft', 'scheduled', 'paused'].includes(c.status), 'אי אפשר לערוך גליון שנשלח או נמצא בשליחה', 409);
+    if (c.status === 'sent' && !c.auto) {
+      // גליון שכבר נשלח: מעדכנים רק את הגרסה שמוצגת בארכיון הציבורי. מה שנשלח לנמענים, הקישורים והנתונים לא משתנים
+      db.run('UPDATE campaigns SET subject=?, preheader=?, mode=?, design=?, html=?, updated_at=? WHERE id=?',
+        str(body.subject, 300), str(body.preheader, 300), body.mode === 'html' ? 'html' : 'blocks', JSON.stringify(body.design || defaultDesign()), String(body.html || '').slice(0, 2_000_000), now(), c.id);
+      db.run('UPDATE campaigns SET archive_html=? WHERE id=?', campaignHtml(getCampaign(c.id), db), c.id);
+      return json(res, { ok: true, archive: true });
+    }
+    need(['draft', 'scheduled', 'paused'].includes(c.status), 'אי אפשר לערוך גליון שנמצא בשליחה', 409);
     need(!body.fromEmail || isEmail(body.fromEmail), 'כתובת השולח לא תקינה');
     need(!body.replyTo || isEmail(body.replyTo), 'כתובת התשובה לא תקינה');
     db.tx(() => {
@@ -533,7 +554,8 @@ export function registerApi(router, { db, worker, version }) {
     });
     json(res, { id });
   });
-  api('DELETE', '/campaigns/:id', ({ res, params }) => {
+  api('DELETE', '/campaigns/:id', ({ req, res, params, user }) => {
+    guardDelete(user, req.headers['x-confirm-delete']);
     const c = getCampaign(params.id);
     need(!db.get('SELECT 1 x FROM automations WHERE campaign_id=?', c.id), 'הגליון משמש אוטומציה. קודם יש למחוק את האוטומציה', 409);
     need(c.status !== 'sending', 'קודם יש להשהות את השליחה', 409);
@@ -640,6 +662,11 @@ export function registerApi(router, { db, worker, version }) {
     json(res, { results });
   });
 
+  // סימון גליון לארכיון הציבורי מפעיל את הארכיון עצמו, כדי שהסימון לא יישאר בלי השפעה
+  const setPublic = (c, on) => {
+    db.run('UPDATE campaigns SET public=? WHERE id=?', on ? 1 : 0, c.id);
+    if (on && db.setting('archiveEnabled') !== '1') db.setSetting('archiveEnabled', '1');
+  };
   api('POST', '/campaigns/:id/send', ({ res, params, body }) => {
     const c = getCampaign(params.id);
     need(!c.auto, 'הגליון הזה משמש אוטומציה ונשלח לבד למצטרפים חדשים', 409);
@@ -647,6 +674,7 @@ export function registerApi(router, { db, worker, version }) {
     need(c.subject.trim(), 'חסר נושא לגליון');
     need(isEmail(c.from_email || db.setting('fromEmail')), 'חסרה כתובת שולח');
     need(db.get('SELECT 1 x FROM campaign_lists WHERE campaign_id=?', c.id), 'לא נבחרה רשימת תפוצה');
+    if (body.public !== undefined) setPublic(c, !!body.public);
     const at = Number(body.scheduledAt) || 0;
     if (at > now() + 30) {
       db.run("UPDATE campaigns SET status='scheduled', scheduled_at=?, updated_at=? WHERE id=?", at, now(), c.id);
@@ -780,9 +808,23 @@ export function registerApi(router, { db, worker, version }) {
   });
 
   api('POST', '/campaigns/:id/public', ({ res, params, body }) => {
-    const c = getCampaign(params.id);
-    db.run('UPDATE campaigns SET public=? WHERE id=?', body.public ? 1 : 0, c.id);
-    json(res, { ok: true });
+    setPublic(getCampaign(params.id), !!body.public);
+    json(res, { ok: true, archiveEnabled: db.setting('archiveEnabled') === '1' });
+  });
+
+  // ---------- גיבויים ----------
+  const adminOnly = (user) => need(user.role === 'admin', 'רק מנהל מערכת יכול לנהל גיבויים', 403);
+  api('GET', '/backups', ({ res, user }) => { adminOnly(user); json(res, listBackups(db)); });
+  api('POST', '/backups', ({ res, user }) => {
+    adminOnly(user);
+    try { json(res, createBackup(db)); } catch (e) { throw new HttpError(500, e.message); }
+  });
+  api('GET', '/backups/:name', ({ res, params, user }) => {
+    adminOnly(user);
+    const file = backupPath(db, params.name);
+    need(file, 'הגיבוי לא נמצא', 404);
+    res.writeHead(200, { 'Content-Type': 'application/gzip', 'Content-Length': fs.statSync(file).size, 'Content-Disposition': `attachment; filename="${params.name}"`, 'Cache-Control': 'no-store' });
+    fs.createReadStream(file).pipe(res);
   });
 
   const PEOPLE = {
@@ -919,6 +961,7 @@ export function registerApi(router, { db, worker, version }) {
         if (!(k in body)) continue;
         if (k === 'smtpPass' && !body.smtpPass && !body.clearSmtpPass) continue;
         if (k === 'googleClientSecret' && !body.googleClientSecret && !body.clearGoogleSecret) continue;
+        if (k === 'pauseRanges') { db.setSetting(k, JSON.stringify(cleanRanges(body[k]))); continue; }
         if (k === 'aiKey' && !body.aiKey && !body.clearAiKey) continue;
         if (k === 'aiKey') { db.setSetting(k, cleanKey(str(body[k], 500))); continue; }
         if (k === 'formColor' && !/^#[0-9a-f]{6}$/i.test(body[k])) continue;

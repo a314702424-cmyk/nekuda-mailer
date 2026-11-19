@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { now } from './db.js';
+import { pauseInfo } from './pause.js';
 import { buildMessage, SmtpConnection, smtpOptions } from './mailer.js';
 import { makeToken, prepareCampaign, personalize, addPixel } from './track.js';
 
@@ -120,6 +121,10 @@ export class Worker {
     }
     runAutomations(db);
     const settings = db.settings();
+    // בהפסקת שליחה (שבת או טווח שהוגדר) הגליונות נשארים בתור, ושום הודעה לא יוצאת
+    const pause = pauseInfo(settings, this.clock ? this.clock() : Date.now());
+    this.state.paused = pause.paused ? pause.reason : '';
+    if (pause.paused) return 0;
     const rate = Math.max(0.1, Number(settings.sendPerSecond) || 5);
     const dailyLimit = Number(settings.dailyLimit) || 0;
     let handled = 0;
