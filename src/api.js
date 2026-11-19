@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,6 +14,8 @@ import { ALL_PERMS, permFor } from '../web/shared/perms.js';
 import { htmlToPdf, chromePath } from './pdf.js';
 import { pauseInfo, cleanRanges } from './pause.js';
 import { listBackups, createBackup, backupPath } from './backup.js';
+import { scanArchive, fetchNewsletter, safeUrl } from './legacy.js';
+import { updateStatus, pullUpdate } from './update.js';
 import { ask, testKey, cleanHtml, cleanKey, parseJson, AiError } from './ai.js';
 
 export const CONFIRM_DELETE = 'מאושר למחיקה';
@@ -96,7 +99,7 @@ function campaignOut(db, c, full = false) {
     replyTo: c.reply_to, mode: c.mode, status: c.status, scheduledAt: c.scheduled_at, startedAt: c.started_at,
     finishedAt: c.finished_at, createdAt: c.created_at, updatedAt: c.updated_at,
     listIds: db.all('SELECT list_id FROM campaign_lists WHERE campaign_id=?', c.id).map((r) => r.list_id),
-    stats: campaignStats(db, c.id), public: !!c.public, auto: !!c.auto, subjectB: c.subject_b || '',
+    stats: campaignStats(db, c.id), public: !!c.public, imported: !!c.imported_from, auto: !!c.auto, subjectB: c.subject_b || '',
     attachments: (() => { try { return JSON.parse(c.attachments || '[]'); } catch { return []; } })(),
   };
   if (full) {
@@ -128,7 +131,7 @@ function previewHtml(db, c, subscriber) {
   return { html: personalize(h, { baseUrl, token, subscriber, isHtml: true, lists }), token, settings, baseUrl };
 }
 
-export function registerApi(router, { db, worker, version }) {
+export function registerApi(router, { db, worker, version, restart = null }) {
   const api = (method, pattern, handler, opts = {}) => router.add(method, '/api' + pattern, handler, { auth: true, perm: permFor(method, pattern), ...opts });
 
   // ---------- מצב והתחברות ----------
@@ -810,6 +813,62 @@ export function registerApi(router, { db, worker, version }) {
   api('POST', '/campaigns/:id/public', ({ res, params, body }) => {
     setPublic(getCampaign(params.id), !!body.public);
     json(res, { ok: true, archiveEnabled: db.setting('archiveEnabled') === '1' });
+  });
+
+  // ---------- ייבוא גליונות מהמערכת הישנה ----------
+  api('POST', '/legacy/scan', async ({ res, body, user }) => {
+    need(user.role === 'admin', 'רק מנהל מערכת יכול לייבא מהמערכת הישנה', 403);
+    let items;
+    try { items = await scanArchive(str(body.url, 500).trim()); } catch (e) { throw new HttpError(502, 'הסריקה נכשלה: ' + e.message); }
+    need(items.length, 'לא נמצאו גליונות בכתובת הזו. צריך את כתובת דף הארכיון הציבורי של המערכת הישנה.', 404);
+    const host = new URL(str(body.url, 500).trim()).host;
+    const have = new Set(db.all("SELECT imported_from FROM campaigns WHERE imported_from LIKE ?", `acy:${host}:%`).map((r) => r.imported_from));
+    json(res, { host, items: items.map((it) => ({ ...it, exists: have.has(`acy:${host}:${it.id}`) })) });
+  });
+  api('POST', '/legacy/import', async ({ res, body, user }) => {
+    need(user.role === 'admin', 'רק מנהל מערכת יכול לייבא מהמערכת הישנה', 403);
+    const items = (Array.isArray(body.items) ? body.items : []).slice(0, 5);
+    need(items.length, 'לא נבחרו גליונות');
+    const baseUrl = db.setting('baseUrl').replace(/\/+$/, '');
+    const results = [];
+    for (const raw of items) {
+      const u = safeUrl(str(raw.url, 800));
+      const id = int(raw.id);
+      const subject = str(raw.subject, 300).trim();
+      if (!u || !id || !subject) { results.push({ id, ok: false, error: 'פרטי הגליון לא תקינים' }); continue; }
+      const key = `acy:${u.host}:${id}`;
+      if (db.get('SELECT 1 x FROM campaigns WHERE imported_from=?', key)) { results.push({ id, ok: true, skipped: true }); continue; }
+      try {
+        const got = await fetchNewsletter({ id, subject, url: u.toString() }, { uploadsDir: path.join(db.dataDir, 'uploads'), baseUrl });
+        const at = int(raw.at) || now();
+        // גליון מיובא נשמר כגליון שנשלח, בלי נמענים ובלי נתונים: הוא קיים לארכיון ולשכפול בלבד
+        const r = db.run(`INSERT INTO campaigns(subject, preheader, from_name, from_email, reply_to, mode, design, html, status, created_at, updated_at, started_at, finished_at, prepared_html, prepared_text, public, imported_from)
+          VALUES(?, '', '', '', '', 'html', ?, ?, 'sent', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        subject, JSON.stringify(defaultDesign()), got.html, at, now(), at, at, got.html, htmlToText(got.html), body.public ? 1 : 0, key);
+        results.push({ id, ok: true, campaignId: Number(r.lastInsertRowid), images: got.images, missing: got.missing });
+      } catch (e) { results.push({ id, ok: false, error: e.message }); }
+    }
+    if (body.public && results.some((r) => r.campaignId) && db.setting('archiveEnabled') !== '1') db.setSetting('archiveEnabled', '1');
+    json(res, { results });
+  });
+
+  // ---------- עדכון המערכת מהמאגר ----------
+  const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  api('GET', '/system/update', ({ res, user }) => {
+    need(user.role === 'admin', 'רק מנהל מערכת יכול לעדכן את המערכת', 403);
+    json(res, updateStatus(appDir));
+  });
+  api('POST', '/system/update', ({ req, res, user }) => {
+    need(user.role === 'admin', 'רק מנהל מערכת יכול לעדכן את המערכת', 403);
+    let typed = '';
+    try { typed = decodeURIComponent(String(req.headers['x-confirm-update'] || '')); } catch { typed = ''; }
+    need(typed.trim() === 'מאושר לעדכון', 'כדי לעדכן יש להקליד "מאושר לעדכון"', 400);
+    const sending = Number(db.get("SELECT COUNT(*) n FROM campaigns WHERE status='sending' AND auto=0").n);
+    const r = pullUpdate(appDir);
+    if (!r.ok) throw new HttpError(500, r.error);
+    json(res, { ...r, restarting: r.changed, sending });
+    // ההפעלה מחדש נעשית על ידי מנהל השירותים של השרת. גליון שבאמצע שליחה ממשיך מאותה נקודה אחרי העלייה
+    if (r.changed && restart) setTimeout(restart, 800);
   });
 
   // ---------- גיבויים ----------
