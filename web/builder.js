@@ -237,7 +237,7 @@ export async function mountBuilder(container, design, opts) {
    * הבחירה נשמרת בשדות נפרדים, ומהם נבנה הקישור עצמו (href), כך שהמייל שנשלח לא תלוי בעורך.
    */
   function buttonAction(b) {
-    if (!b.action) b.action = /^mailto:/i.test(b.href || '') ? 'mail' : /^tel:/i.test(b.href || '') ? 'tel' : /^https:\/\/wa\.me\//i.test(b.href || '') ? 'wa' : 'link';
+    if (!b.action) b.action = /\/pdf\/\{\{TOKEN\}\}$/.test(b.href || '') ? 'pdf' : /^mailto:/i.test(b.href || '') ? 'mail' : /^tel:/i.test(b.href || '') ? 'tel' : /^https:\/\/wa\.me\//i.test(b.href || '') ? 'wa' : 'link';
     if (b.action === 'mail' && b.mailTo === undefined) {
       // כפתור ישן שהקישור שלו הוקלד ידנית כ-mailto: מפרקים אותו לשדות
       const m = /^mailto:([^?]*)\??(.*)$/i.exec(b.href || '') || [];
@@ -254,6 +254,7 @@ export async function mountBuilder(container, design, opts) {
         b.href = 'mailto:' + String(b.mailTo || '').trim().replace(/\s+/g, '') + (parts.length ? '?' + parts.join('&') : '');
       } else if (b.action === 'tel') b.href = 'tel:' + digits(b.phone);
       else if (b.action === 'wa') b.href = 'https://wa.me/' + intl(b.phone) + (b.waText ? '?text=' + enc(b.waText) : '');
+      else if (b.action === 'pdf') b.href = '{{BASE}}/pdf/{{TOKEN}}';
       changed();
     };
     const box = h('div', { class: 'btn-action' });
@@ -272,15 +273,18 @@ export async function mountBuilder(container, design, opts) {
         box.replaceChildren(h('div', { class: 'fields' }, field('מספר וואטסאפ', inp('phone', 'tel', { class: 'ltr', placeholder: '050-1234567' })),
           field('הודעה מוכנה (לא חובה)', inp('waText', 'text', { placeholder: 'למשל: שלום, ראיתי את הגליון' }))),
         h('p', { class: 'muted small-note' }, 'לחיצה פותחת שיחת וואטסאפ עם המספר, וההודעה כבר כתובה. מספר שמתחיל ב-0 מומר לקידומת ישראל (972).'));
+      } else if (b.action === 'pdf') {
+        box.replaceChildren(h('p', { class: 'muted small-note' }, 'לחיצה על הכפתור מורידה לנמען את הגליון הזה כקובץ PDF. אין צורך בקישור: המערכת מפיקה את הקובץ לבד. בתצוגה המקדימה ובשליחת בדיקה הכפתור עדיין לא מוריד קובץ מהגליון הסופי.'));
       } else {
         box.replaceChildren(h('div', { class: 'fields' }, field('כתובת הקישור', h('input', { type: 'url', class: 'ltr', value: /^(mailto:|tel:)/i.test(b.href || '') ? 'https://' : (b.href || 'https://'), placeholder: 'https://', oninput: (e) => { b.href = e.target.value; changed(); } }))));
       }
     };
     const kind = h('select', { onchange: () => {
       b.action = kind.value;
+      if (b.action === 'pdf' && (!b.text || b.text === 'לחץ כאן')) b.text = 'הורד כ-PDF';
       if (b.action === 'link') b.href = /^https?:\/\//i.test(b.href || '') && !/^https:\/\/wa\.me\//i.test(b.href) ? b.href : 'https://'; else build();
       draw(); changed();
-    } }, [['link', 'מעבר לקישור (אתר או דף)'], ['mail', 'שליחת מייל (פותח טיוטה מוכנה)'], ['tel', 'חיוג לטלפון'], ['wa', 'הודעת וואטסאפ']].map(([v, t]) => h('option', { value: v, selected: b.action === v }, t)));
+    } }, [['link', 'מעבר לקישור (אתר או דף)'], ['pdf', 'הורדת הגליון כ-PDF'], ['mail', 'שליחת מייל (פותח טיוטה מוכנה)'], ['tel', 'חיוג לטלפון'], ['wa', 'הודעת וואטסאפ']].map(([v, t]) => h('option', { value: v, selected: b.action === v }, t)));
     draw();
     return h('div', {}, field('מה קורה בלחיצה על הכפתור', kind), box);
   }

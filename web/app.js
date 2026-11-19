@@ -31,6 +31,26 @@ async function api(method, url, body, opts = {}) {
 /** מריץ פעולה ומציג שגיאה כהודעה במקום לקרוס. */
 const safe = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { toast(e.message, true); return undefined; } };
 
+const isAdmin = () => state.meta?.user?.role === 'admin';
+const CONFIRM_DELETE = 'מאושר למחיקה';
+/**
+ * הגנה כפולה על מחיקה: חלון שבו צריך להקליד את משפט האישור. מחזיר את הכותרת שנשלחת לשרת, או null אם בוטל.
+ * גם השרת בודק את המשפט ואת היות המשתמש מנהל, כך שאי אפשר לעקוף את החלון.
+ */
+function confirmDelete(what) {
+  return new Promise((resolve) => {
+    const box = h('input', { type: 'text', autocomplete: 'off', placeholder: CONFIRM_DELETE });
+    const go = h('button', { class: 'danger', disabled: true, onclick: () => { done = { 'X-Confirm-Delete': encodeURIComponent(box.value.trim()) }; d.close(); } }, 'מחיקה לצמיתות');
+    let done = null;
+    box.oninput = () => { go.disabled = box.value.trim() !== CONFIRM_DELETE; };
+    box.onkeydown = (e) => { if (e.key === 'Enter' && !go.disabled) go.click(); };
+    const d = dialog('אישור מחיקה', h('div', {}, h('p', {}, what), h('p', { class: 'notice bad' }, 'המחיקה לצמיתות ואי אפשר לבטל אותה.'),
+      field(`כדי לאשר, יש להקליד: ${CONFIRM_DELETE}`, box)), (close) => [h('button', { onclick: close }, 'ביטול'), go]);
+    d.addEventListener('close', () => resolve(done));
+    box.focus();
+  });
+}
+
 const field = (label, control) => h('div', {}, h('label', {}, label), control);
 const text = (value = '', attrs = {}) => h('input', { type: 'text', value, ...attrs });
 
@@ -101,9 +121,10 @@ function campaignTable(rows) {
         h('td', {}, h('div', { class: 'row' },
           h('a', { class: 'btn small', href: `#/stats/${c.id}` }, 'נתונים'),
           can('campaigns.edit') ? h('button', { class: 'small', onclick: safe(async () => { const r = await api('POST', `/campaigns/${c.id}/duplicate`, {}); location.hash = `#/campaign/${r.id}`; }) }, 'שכפול') : null,
-          !can('campaigns.delete') ? null : h('button', { class: 'small danger', onclick: safe(async () => {
-            if (!window.confirm(`למחוק את הגליון "${c.subject}"? הנתונים הסטטיסטיים שלו יימחקו.`)) return;
-            await api('DELETE', `/campaigns/${c.id}`); route();
+          !isAdmin() ? null : h('button', { class: 'small danger', onclick: safe(async () => {
+            const headers = await confirmDelete(`למחוק את הגליון "${c.subject || '(ללא נושא)'}"? גם הנתונים הסטטיסטיים שלו יימחקו.`);
+            if (!headers) return;
+            await api('DELETE', `/campaigns/${c.id}`, undefined, { headers }); route();
           }) }, 'מחיקה'))));
     })));
 }
@@ -114,6 +135,7 @@ async function dashboardPage() {
   shell([
     h('h1', {}, 'לוח בקרה'),
     d.worker?.lastError ? h('div', { class: 'notice bad' }, 'בעיה בשליחה: ' + d.worker.lastError) : null,
+    d.pause?.paused ? h('div', { class: 'notice' }, '⏸ ' + d.pause.reason + '. הגליונות נשארים בתור ושום הודעה לא יוצאת עד אז.') : null,
     h('div', { class: 'cards' },
       stat(fmt(d.subscribers.active), 'נמענים פעילים'),
       stat(fmt((d.subscribers.unsubscribed || 0) + (d.subscribers.bounced || 0) + (d.subscribers.blocked || 0)), 'הוסרו או נחסמו'),
@@ -150,7 +172,8 @@ function issueList(result) {
 
 async function campaignPage(id) {
   const [c] = await Promise.all([api('GET', `/campaigns/${id}`), loadLists()]);
-  if (!['draft', 'scheduled', 'paused'].includes(c.status)) { location.hash = `#/stats/${id}`; return; }
+  const sentMode = c.status === 'sent' && !c.auto; // עריכת הגרסה שמוצגת בארכיון הציבורי
+  if (!['draft', 'scheduled', 'paused'].includes(c.status) && !sentMode) { location.hash = `#/stats/${id}`; return; }
   const design = c.design || defaultDesign();
   const subject = text(c.subject);
   const preheader = text(c.preheader, { placeholder: 'השורה שמופיעה אחרי הנושא בתיבת הדואר' });
@@ -198,6 +221,7 @@ async function campaignPage(id) {
   };
   // שמירה אוטומטית כל 20 שניות, כל עוד נמצאים במסך הזה
   const auto = setInterval(() => {
+    if (sentMode) return; // גרסה ציבורית נשמרת רק בלחיצה מפורשת, כדי ששינוי באמצע עריכה לא יתפרסם
     if (location.hash !== here || !document.body.contains(body)) { clearInterval(auto); return; }
     if (dirty && !saving) save(true).catch(() => { saveState.textContent = 'השמירה האוטומטית נכשלה'; });
   }, 20000);
@@ -328,9 +352,10 @@ async function campaignPage(id) {
     const errors = chk.issues.filter((i) => i.level === 'error').length;
     const when = h('input', { type: 'datetime-local' });
     const force = h('input', { type: 'checkbox' });
+    const pub = h('input', { type: 'checkbox', checked: !!c.public });
     const go = h('button', { class: 'primary', disabled: !rc.fresh || errors > 0, onclick: safe(async () => {
       const at = when.value ? Math.floor(new Date(when.value).getTime() / 1000) : 0;
-      const r = await api('POST', `/campaigns/${id}/send`, { scheduledAt: at });
+      const r = await api('POST', `/campaigns/${id}/send`, { scheduledAt: at, public: pub.checked });
       toast(r.scheduled ? `הגליון תוזמן ל-${date(r.scheduled)}` : `${fmt(r.queued)} הודעות נכנסו לתור`);
       document.querySelector('dialog')?.close();
       clearInterval(auto);
@@ -341,7 +366,9 @@ async function campaignPage(id) {
       h('p', {}, `הגליון יישלח ל-${fmt(rc.fresh)} נמענים פעילים.`, rc.already ? ` (${fmt(rc.already)} כבר קיבלו או נמצאים בתור ולא יקבלו שוב.)` : ''),
       issueList(chk),
       errors ? h('label', { class: 'inline-check', style: 'margin-top:8px' }, force, 'לשלוח למרות הבעיות שסומנו "לתקן"') : null,
-      field('תזמון (להשאיר ריק לשליחה מיידית)', when)), (close) => [h('button', { onclick: close }, 'ביטול'), go]);
+      field('תזמון (להשאיר ריק לשליחה מיידית)', when),
+      h('label', { class: 'inline-check', style: 'margin-top:12px' }, pub, 'להעלות את הגליון לעמוד הציבורי (', h('a', { href: '/archive', target: '_blank' }, '/archive'), ') אחרי השליחה'),
+      h('p', { class: 'muted small-note' }, 'בעמוד הציבורי אפשר לקרוא את הגליון ולהוריד אותו כ-PDF. אפשר להסיר אותו משם או לערוך אותו בכל רגע, במסך הנתונים של הגליון.')), (close) => [h('button', { onclick: close }, 'ביטול'), go]);
   });
 
   const modeBtn = h('button', { onclick: async () => {
@@ -354,22 +381,24 @@ async function campaignPage(id) {
   shell([
     h('div', { class: 'bar' }, h('h1', {}, 'עריכת גליון'), saveState, tag(CAMP_STATUS, c.status), modeBtn,
       h('button', { onclick: versions }, 'גרסאות'), h('button', { onclick: aiDialog }, '✨ עוזר AI'), h('button', { onclick: fullPreview }, 'תצוגה מלאה'), h('button', { onclick: downloadPdf }, 'הורד כ-PDF'), h('button', { onclick: runCheck }, 'בדיקה'),
-      h('button', { onclick: sendTest }, 'שליחת בדיקה'), h('button', { onclick: safe(() => save(false, true)) }, 'שמירה'),
-      c.auto ? h('a', { class: 'btn primary', href: '#/automations' }, 'לאוטומציות')
+      sentMode ? null : h('button', { onclick: sendTest }, 'שליחת בדיקה'), h('button', { class: sentMode ? 'primary' : '', onclick: safe(() => save(false, true)) }, sentMode ? 'שמירת הגרסה לארכיון' : 'שמירה'),
+      sentMode ? h('a', { class: 'btn', href: `#/stats/${id}` }, 'חזרה לנתונים')
+      : c.auto ? h('a', { class: 'btn primary', href: '#/automations' }, 'לאוטומציות')
       : c.status === 'scheduled'
         ? h('button', { class: 'danger', onclick: safe(async () => { await api('POST', `/campaigns/${id}/unschedule`, {}); route(); }) }, 'ביטול תזמון')
         : c.status === 'paused'
           ? h('button', { class: 'primary', onclick: safe(async () => { await save(true); await api('POST', `/campaigns/${id}/resume`, {}); location.hash = `#/stats/${id}`; }) }, 'המשך שליחה')
           : h('button', { class: 'primary', onclick: sendDialog }, 'שליחה…')),
+    sentMode ? h('div', { class: 'notice' }, 'הגליון הזה כבר נשלח. כאן עורכים רק את הגרסה שמוצגת בארכיון הציבורי ובהורדת ה-PDF שלו. מה שהנמענים קיבלו, הקישורים שבמייל והנתונים לא משתנים.') : null,
     c.status === 'scheduled' ? h('div', { class: 'notice' }, `הגליון מתוזמן ל-${date(c.scheduledAt)}. שינויים שתשמור עד אז ייכנסו לשליחה.`) : null,
     c.auto ? h('div', { class: 'notice' }, 'הגליון הזה משמש אוטומציה: הוא נשלח לבד למי שמצטרף לרשימה. אחרי עריכה יש להפעיל את האוטומציה מחדש במסך "אוטומציות".') : null,
     h('div', { class: 'card' },
       h('div', { class: 'row' }, h('div', { class: 'grow' }, field('נושא', subject)), h('div', { class: 'grow' }, field('תקציר', preheader))),
       h('div', { class: 'row' }, h('div', { class: 'grow' }, field('שם השולח', fromName)), h('div', { class: 'grow' }, field('כתובת השולח', fromEmail)), h('div', { class: 'grow' }, field('כתובת לתשובה', replyTo)),
         h('div', { class: 'grow' }, field('שם קמפיין ל-UTM', utm))),
-      c.auto ? null : h('div', { class: 'row' }, h('div', { class: 'grow' }, field('נושא חלופי לבדיקת A/B', subjectB))),
-      c.auto ? null : [h('label', {}, 'רשימות תפוצה'), lists],
-      h('label', { style: 'margin-top:10px' }, 'קבצים מצורפים'), attBox),
+      c.auto || sentMode ? null : h('div', { class: 'row' }, h('div', { class: 'grow' }, field('נושא חלופי לבדיקת A/B', subjectB))),
+      c.auto || sentMode ? null : [h('label', {}, 'רשימות תפוצה'), lists],
+      sentMode ? null : [h('label', { style: 'margin-top:10px' }, 'קבצים מצורפים'), attBox]),
     body,
   ]);
   lists.addEventListener('change', touch);
@@ -399,7 +428,9 @@ async function statsPage(id) {
     c.status === 'sent' && can('campaigns.edit') ? h('label', { class: 'inline-check', style: 'margin-bottom:12px' }, h('input', { type: 'checkbox', checked: c.public, onchange: safe(async (e) => {
       await api('POST', `/campaigns/${id}/public`, { public: e.target.checked });
       toast(e.target.checked ? 'הגליון יוצג בארכיון הציבורי' : 'הגליון הוסר מהארכיון הציבורי');
-    }) }), 'להציג בארכיון הציבורי (', h('a', { href: '/archive', target: '_blank' }, '/archive'), ')') : null,
+    }) }), 'להציג בעמוד הציבורי (', h('a', { href: '/archive', target: '_blank' }, '/archive'), ')',
+      h('a', { class: 'btn small', style: 'margin-inline-start:10px', href: `#/campaign/${id}` }, 'עריכת הגרסה הציבורית'),
+      h('a', { class: 'btn small', href: `/archive/${id}`, target: '_blank' }, 'צפייה')) : null,
     h('div', { class: 'cards' },
       stat(fmt(s.sent), 'נשלחו', `מתוך ${fmt(s.total)}`), stat(fmt(s.pending), 'ממתינים בתור'),
       stat(fmt(s.opened), 'פתחו', pct(s.opened, s.sent)), stat(fmt(s.clicked), 'לחצו', pct(s.clicked, s.sent)),
@@ -544,7 +575,7 @@ async function usersPage() {
       h('div', { class: 'row' }, h('div', { class: 'grow' }, field('שם משתמש', username)), h('div', { class: 'grow' }, field('כתובת Google (לכניסה עם חשבון Google)', email))),
       h('div', { class: 'row' }, h('div', { class: 'grow' }, field('סיסמה (10 תווים לפחות)', password)), h('div', { class: 'grow' }, field('סוג', role))),
       h('label', { class: 'inline-check', style: 'margin-top:10px' }, active, 'חשבון פעיל'), boxes), (close) => [
-      u ? h('button', { class: 'danger', onclick: safe(async () => { if (!window.confirm(`למחוק את המשתמש "${u.username}"?`)) return; await api('DELETE', `/users/${u.id}`); close(); route(); }) }, 'מחיקה') : null,
+      u && isAdmin() ? h('button', { class: 'danger', onclick: safe(async () => { const headers = await confirmDelete(`למחוק את המשתמש "${u.username}"?`); if (!headers) return; await api('DELETE', `/users/${u.id}`, undefined, { headers }); close(); route(); }) }, 'מחיקה') : null,
       h('button', { onclick: close }, 'ביטול'),
       h('button', { class: 'primary', onclick: safe(async () => {
         const body = { username: username.value, email: email.value, password: password.value, role: role.value, active: active.checked,
@@ -598,7 +629,7 @@ async function subscribersPage() {
       }) }, 'הצגת היסטוריה'));
     }
     dialog(row ? 'עריכת נמען' : 'נמען חדש', h('div', {}, field('כתובת מייל', email), field('שם', name), field('מצב', st), custom.map((f) => field(f.label, f.el)), h('label', {}, 'רשימות'), lists, hist), (close) => [
-      row ? h('button', { class: 'danger', onclick: safe(async () => { if (!window.confirm('למחוק את הנמען לצמיתות?')) return; await api('DELETE', `/subscribers/${row.id}`); close(); load(); }) }, 'מחיקה') : null,
+      row && isAdmin() ? h('button', { class: 'danger', onclick: safe(async () => { const headers = await confirmDelete(`למחוק את הנמען ${row.email}?`); if (!headers) return; await api('DELETE', `/subscribers/${row.id}`, undefined, { headers }); close(); load(); }) }, 'מחיקה') : null,
       h('button', { onclick: close }, 'ביטול'),
       h('button', { class: 'primary', onclick: safe(async () => {
         await api(row ? 'PUT' : 'POST', row ? `/subscribers/${row.id}` : '/subscribers', { email: email.value, name: name.value, status: st.value, listIds: lists.values(), fields: Object.fromEntries(custom.map((f) => [f.key, f.el.value])) });
@@ -624,7 +655,7 @@ async function subscribersPage() {
     const filter = { q: q.value, status: status.value, list: list.value };
     const filtered = !!(q.value.trim() || status.value || list.value);
     const { count } = await api('POST', '/subscribers/bulk', { filter, all: true, dryRun: true });
-    const action = h('select', {}, [['addToList', 'הוספה לרשימה'], ['removeFromList', 'הסרה מרשימה'], ['setStatus', 'שינוי מצב'], ...(can('subscribers.delete') ? [['delete', 'מחיקה לצמיתות']] : [])].map(([v, tx]) => h('option', { value: v }, tx)));
+    const action = h('select', {}, [['addToList', 'הוספה לרשימה'], ['removeFromList', 'הסרה מרשימה'], ['setStatus', 'שינוי מצב'], ...(isAdmin() ? [['delete', 'מחיקה לצמיתות']] : [])].map(([v, tx]) => h('option', { value: v }, tx)));
     const target = h('select', {}, state.lists.map((l) => h('option', { value: l.id }, l.name)));
     const st = h('select', {}, Object.entries(SUB_STATUS).map(([k, v]) => h('option', { value: k }, v[0])));
     const targetRow = field('רשימה', target);
@@ -635,8 +666,13 @@ async function subscribersPage() {
       h('p', {}, `הפעולה תחול על ${fmt(count)} נמענים`, filtered ? ' שמתאימים לסינון הנוכחי.' : '. לא נבחר סינון, כלומר על כל הנמענים במערכת.'),
       field('פעולה', action), targetRow, stRow), (close) => [h('button', { onclick: close }, 'ביטול'),
       h('button', { class: 'primary', disabled: !count, onclick: safe(async () => {
-        if (!window.confirm(`לבצע את הפעולה על ${fmt(count)} נמענים?${action.value === 'delete' ? ' המחיקה אינה ניתנת לביטול.' : ''}`)) return;
-        const r = await api('POST', '/subscribers/bulk', { filter, all: !filtered, action: action.value, listId: Number(target.value), status: st.value });
+        let confirm = '';
+        if (action.value === 'delete') {
+          const headers = await confirmDelete(`למחוק ${fmt(count)} נמענים?`);
+          if (!headers) return;
+          confirm = CONFIRM_DELETE;
+        } else if (!window.confirm(`לבצע את הפעולה על ${fmt(count)} נמענים?`)) return;
+        const r = await api('POST', '/subscribers/bulk', { filter, all: !filtered, action: action.value, listId: Number(target.value), status: st.value, confirm });
         toast(`הפעולה בוצעה על ${fmt(r.count)} נמענים`);
         close(); await loadLists(); load();
       }) }, 'ביצוע')]);
@@ -676,10 +712,11 @@ async function listsPage() {
       state.lists.map((l) => h('tr', {},
         h('td', {}, h('b', {}, l.name)), h('td', { class: 'muted' }, l.description), h('td', { class: 'num' }, fmt(l.active)), h('td', { class: 'num' }, fmt(l.total)),
         h('td', {}, h('div', { class: 'row' }, h('button', { class: 'small', onclick: () => edit(l) }, 'עריכה'),
-          h('button', { class: 'small danger', onclick: safe(async () => {
-            if (!window.confirm(`למחוק את הרשימה "${l.name}"? הנמענים עצמם לא יימחקו.`)) return;
-            await api('DELETE', `/lists/${l.id}`); route();
-          }) }, 'מחיקה'))))))) : h('p', { class: 'muted' }, 'עדיין אין רשימות. צור רשימה ואז ייבא אליה נמענים.'),
+          isAdmin() ? h('button', { class: 'small danger', onclick: safe(async () => {
+            const headers = await confirmDelete(`למחוק את הרשימה "${l.name}"? הנמענים עצמם לא יימחקו.`);
+            if (!headers) return;
+            await api('DELETE', `/lists/${l.id}`, undefined, { headers }); route();
+          }) }, 'מחיקה') : null)))))) : h('p', { class: 'muted' }, 'עדיין אין רשימות. צור רשימה ואז ייבא אליה נמענים.'),
   ]);
 }
 
@@ -736,6 +773,43 @@ async function settingsPage() {
       field('כתובת לקפיצות (Return-Path). המערכת מוסיפה לה מזהה נמען אחרי סימן +', inp('bounceAddress', { class: 'ltr', placeholder: 'bounce@example.org' })),
       field('כתובת פיזית של העסק (מופיעה בתחתית אוטומטית)', inp('companyAddress')),
       ),
+    (() => {
+      let ranges = [];
+      try { ranges = JSON.parse(s.pauseRanges || '[]'); } catch { ranges = []; }
+      f.pauseRanges = { get value() { return ranges.filter((r) => r.from && r.to); } };
+      const shabbat = h('input', { type: 'checkbox', checked: s.pauseShabbat === '1' });
+      f.pauseShabbat = { get value() { return shabbat.checked ? '1' : '0'; } };
+      const listBox = h('div');
+      const draw = () => listBox.replaceChildren(...[...ranges.map((r, i) => h('div', { class: 'row', style: 'margin-bottom:6px' },
+        h('div', {}, field('מתאריך ושעה', h('input', { type: 'datetime-local', value: r.from || '', onchange: (e) => { r.from = e.target.value; } }))),
+        h('div', {}, field('עד תאריך ושעה', h('input', { type: 'datetime-local', value: r.to || '', onchange: (e) => { r.to = e.target.value; } }))),
+        h('div', { class: 'grow' }, field('הערה (לא חובה)', h('input', { type: 'text', value: r.note || '', placeholder: 'למשל: חג הפסח', oninput: (e) => { r.note = e.target.value; } }))),
+        h('div', {}, field('\u00a0', h('button', { type: 'button', class: 'small danger', onclick: () => { ranges.splice(i, 1); draw(); } }, 'הסרה'))))),
+      ranges.length ? null : h('p', { class: 'muted' }, 'לא הוגדרו הפסקות נוספות.')].filter(Boolean));
+      draw();
+      return h('div', { class: 'card' }, h('h2', {}, 'הפסקות שליחה'),
+        h('p', { class: 'muted' }, 'בזמן הפסקה הגליונות נשארים בתור ושום הודעה לא יוצאת. בסיום ההפסקה השליחה ממשיכה לבד, לפי התקרה היומית. כל השעות לפי שעון ישראל.'),
+        h('label', { class: 'inline-check' }, shabbat, h('b', {}, 'הפסקת שבת:'), '\u00a0מיום שישי ב-12:00 עד מוצאי שבת בחצות'),
+        h('h3', { style: 'margin-top:14px' }, 'הפסקות נוספות לפי תאריכים'), listBox,
+        h('button', { type: 'button', class: 'small', onclick: () => { ranges.push({ from: '', to: '', note: '' }); draw(); } }, '+ הוספת הפסקה'),
+        h('p', { class: 'muted small-note' }, 'ההפסקות נשמרות בלחיצה על "שמירת הגדרות". הפסקה שהתאריכים שלה לא מלאים, או שסופה לפני תחילתה, לא נשמרת.'));
+    })(),
+    isAdmin() ? (() => {
+      const box = h('div', {}, 'טוען…');
+      const size = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + 'MB' : Math.ceil(n / 1024) + 'KB');
+      const load = safe(async () => {
+        const rows = await api('GET', '/backups');
+        box.replaceChildren(rows.length ? h('table', { class: 'data' }, h('tr', {}, ['גיבוי', 'נוצר', 'גודל', ''].map((t) => h('th', {}, t))),
+          rows.map((b) => h('tr', {}, h('td', { class: 'ltr' }, b.name), h('td', { class: 'num' }, date(b.at)), h('td', { class: 'num' }, size(b.size)),
+            h('td', {}, h('a', { class: 'btn small', href: `/api/backups/${b.name}` }, 'הורדה למחשב'))))) : h('p', { class: 'muted' }, 'עדיין אין גיבויים. הגיבוי היומי הראשון ייווצר הלילה, ואפשר ליצור אחד עכשיו.'));
+      });
+      load();
+      return h('div', { class: 'card' }, h('h2', {}, 'גיבויים'),
+        h('p', { class: 'muted' }, 'פעם ביממה, אחרי 02:00, נוצר גיבוי מלא: כל הנמענים, הרשימות, הגליונות, הנתונים, ההגדרות, התמונות והקבצים המצורפים. נשמרים שבעת הגיבויים האחרונים. הגיבויים שמורים על אותו שרת, ולכן כדאי להוריד עותק למחשב מדי פעם.'),
+        box,
+        h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { type: 'button', onclick: async (e) => { e.target.disabled = true; try { await api('POST', '/backups', {}); toast('הגיבוי נוצר'); await load(); } catch (err) { toast(err.message, true); } finally { e.target.disabled = false; } } }, 'יצירת גיבוי עכשיו')),
+        h('p', { class: 'muted small-note' }, 'קובץ הגיבוי כולל את כל פרטי הנמענים וגם את המפתחות והסיסמאות המוצפנות של המערכת. יש לשמור אותו במקום בטוח ולא לשלוח אותו במייל.'));
+    })() : null,
     (() => {
       const key = h('input', { type: 'password', autocomplete: 'new-password', class: 'ltr', placeholder: s.hasAiKey ? 'מפתח שמור. להשאיר ריק כדי לא לשנות' : 'מפתח מ-Google AI Studio' });
       // שדה חופשי עם הצעות: אפשר לבחור מנוע מהרשימה שחזרה מ-Google, או להקליד שם מנוע ידנית
