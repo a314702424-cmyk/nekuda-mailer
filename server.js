@@ -1,3 +1,4 @@
+import { dailyBackup } from './src/backup.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -64,7 +65,10 @@ export function createApp({ dataDir, startWorker = true, log = console } = {}) {
   });
 
   if (startWorker) worker.start();
-  return { server, db, worker, close: () => new Promise((r) => { worker.stop(); server.close(() => { db.close(); r(); }); server.closeAllConnections?.(); }) };
+  // גיבוי יומי: נבדק כל חצי שעה, ונוצר פעם אחת ביום אחרי 02:00 לפי שעון ישראל
+  const backupTimer = startWorker ? setInterval(() => dailyBackup(db, log), 30 * 60 * 1000) : null;
+  if (backupTimer) { backupTimer.unref(); setTimeout(() => dailyBackup(db, log), 60 * 1000).unref(); }
+  return { server, db, worker, close: () => new Promise((r) => { worker.stop(); if (backupTimer) clearInterval(backupTimer); server.close(() => { db.close(); r(); }); server.closeAllConnections?.(); }) };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
