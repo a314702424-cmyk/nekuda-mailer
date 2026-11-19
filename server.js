@@ -12,12 +12,12 @@ import { Worker } from './src/worker.js';
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 
-export function createApp({ dataDir, startWorker = true, log = console } = {}) {
+export function createApp({ dataDir, startWorker = true, log = console, restart = null } = {}) {
   const db = openDb(dataDir);
   const worker = new Worker(db, log);
   const router = new Router();
   const webDir = path.join(ROOT, 'web');
-  registerApi(router, { db, worker, version: VERSION });
+  registerApi(router, { db, worker, version: VERSION, restart });
   registerPublic(router, { db });
 
   const server = http.createServer(async (req, res) => {
@@ -75,7 +75,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const port = Number(process.env.PORT) || 3080;
   const host = process.env.HOST || '127.0.0.1';
   const dataDir = path.resolve(process.env.DATA_DIR || path.join(ROOT, 'data'));
-  const app = createApp({ dataDir });
+  // עדכון מהמאגר מסתיים ביציאה מסודרת. מנהל השירותים של השרת (systemd, Restart=always) מעלה את הגרסה החדשה
+  const restart = () => { console.log('יציאה לצורך עדכון גרסה'); setTimeout(() => process.exit(0), 5000).unref(); app.close().then(() => process.exit(0)); };
+  const app = createApp({ dataDir, restart });
   app.server.listen(port, host, () => console.log(`nekuda-mailer ${VERSION} מאזין על http://${host}:${port} (נתונים: ${dataDir})`));
   const stop = () => app.close().then(() => process.exit(0));
   process.on('SIGINT', stop);
