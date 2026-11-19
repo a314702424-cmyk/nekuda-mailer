@@ -18,6 +18,8 @@ const RULES = [
   [/^\/users/, 'users.manage'],
   [/^\/settings/, 'settings.manage'],
   [/^\/backups/, 'settings.manage'],
+  [/^\/system/, 'settings.manage'],
+  [/^\/legacy/, 'campaigns.edit'],
   [/^\/upload$/, ['campaigns.edit', 'settings.manage']],
   [/^\/lists/, { GET: 'lists.view', _: 'lists.edit' }],
   [/^\/import$/, 'subscribers.import'],
