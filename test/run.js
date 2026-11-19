@@ -66,7 +66,7 @@ let cookie = '';
 async function call(method, url, body, extra = {}) {
   const res = await fetch(base + url, {
     method, redirect: 'manual',
-    headers: { 'X-Requested-With': 'nm', ...(body !== undefined && !extra.rawBody ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}), ...(extra.headers || {}) },
+    headers: { 'X-Requested-With': 'nm', ...(method === 'DELETE' && !extra.noConfirm ? { 'X-Confirm-Delete': encodeURIComponent('מאושר למחיקה') } : {}), ...(body !== undefined && !extra.rawBody ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}), ...(extra.headers || {}) },
     body: body === undefined ? undefined : (extra.rawBody ? body : JSON.stringify(body)),
   });
   const set = res.headers.get('set-cookie');
@@ -436,7 +436,7 @@ try {
   assert.equal(Number(app.db.get('SELECT COUNT(*) n FROM subscriptions WHERE list_id=?', bulkList).n), 0);
   const subsBefore = Number(app.db.get('SELECT COUNT(*) n FROM subscribers').n);
   await ok('POST', '/api/import', { text: 'bulk1@del.com\nbulk2@del.com', listIds: [bulkList], status: 'active' });
-  assert.equal((await ok('POST', '/api/subscribers/bulk', { filter: { list: bulkList }, action: 'delete' })).count, 2);
+  assert.equal((await ok('POST', '/api/subscribers/bulk', { filter: { list: bulkList }, action: 'delete', confirm: 'מאושר למחיקה' })).count, 2);
   assert.equal(Number(app.db.get('SELECT COUNT(*) n FROM subscribers').n), subsBefore);
 
   await ok('PUT', '/api/settings', { formTitle: 'הצטרפו לגליון <נקודה>', formIntro: 'שורה א\nשורה ב', formButton: 'אני בפנים', formSuccess: 'נרשמת בהצלחה', formColor: '#aa0000', formAskName: '0', formListId: String(bulkList) });
@@ -747,6 +747,114 @@ try {
     assert.equal(Number(app.db.get('SELECT COUNT(*) n FROM links WHERE campaign_id=?', cm).n), 1);
   }
   step('כפתור ששולח מייל: טיוטה עם כתובת, נושא וגוף, בלי לשבור את הקישור');
+
+  // --- גרסה 0.8.0: הפסקות שליחה, PDF לנמענים, מחיקה מוגנת, גיבויים ועריכת ארכיון ---
+  {
+    const { pauseInfo, cleanRanges } = await import('../src/pause.js');
+    const at = (iso) => Date.parse(iso); // 2026-11-20 הוא יום שישי. בנובמבר ישראל ב-UTC+2
+    const sh = { pauseShabbat: '1', pauseRanges: '[]' };
+    assert.equal(pauseInfo(sh, at('2026-11-20T09:59:00Z')).paused, false, 'שישי 11:59');
+    assert.equal(pauseInfo(sh, at('2026-11-20T10:00:00Z')).paused, true, 'שישי 12:00');
+    assert.equal(pauseInfo(sh, at('2026-11-21T21:59:00Z')).paused, true, 'שבת 23:59');
+    assert.equal(pauseInfo(sh, at('2026-11-21T22:00:00Z')).paused, false, 'מוצאי שבת בחצות');
+    assert.equal(pauseInfo({ pauseShabbat: '0', pauseRanges: '[]' }, at('2026-11-21T10:00:00Z')).paused, false);
+    assert.equal(pauseInfo(sh, at('2026-07-10T08:59:00Z')).paused, false, 'בקיץ (UTC+3) שישי 11:59');
+    assert.equal(pauseInfo(sh, at('2026-07-10T09:00:00Z')).paused, true, 'בקיץ שישי 12:00');
+    const rg = { pauseShabbat: '0', pauseRanges: JSON.stringify([{ from: '2026-12-01T08:00', to: '2026-12-03T20:00', note: 'חג' }]) };
+    assert.equal(pauseInfo(rg, at('2026-12-01T05:59:00Z')).paused, false);
+    assert.match(pauseInfo(rg, at('2026-12-02T10:00:00Z')).reason, /חג.*03\/12\/2026 בשעה 20:00/);
+    assert.equal(pauseInfo(rg, at('2026-12-03T18:00:00Z')).paused, false, 'בסוף הטווח השליחה מתחדשת');
+    assert.deepEqual(cleanRanges([{ from: '2026-12-05T10:00', to: '2026-12-01T10:00' }, { from: 'x', to: 'y' }, { from: '2026-12-01T10:00', to: '2026-12-02T10:00', note: 'א' }]), [{ from: '2026-12-01T10:00', to: '2026-12-02T10:00', note: 'א' }]);
+
+    // השהיה בפועל: הגליון נשאר בתור ולא יוצאות הודעות, ואחרי ההפסקה השליחה ממשיכה
+    const Lp = (await ok('POST', '/api/lists', { name: 'רשימת הפסקה' })).id;
+    await ok('POST', '/api/import', { text: 'p1@pause.org\np2@pause.org', listIds: [Lp], status: 'active' });
+    const cp = (await ok('POST', '/api/campaigns', {})).id;
+    const dp = defaultDesign();
+    dp.blocks = [{ type: 'text', html: '<p>גליון עם PDF</p>' }, { type: 'button', text: 'הורד כ-PDF', action: 'pdf', href: '{{BASE}}/pdf/{{TOKEN}}' }];
+    await ok('PUT', `/api/campaigns/${cp}`, { subject: 'גליון בהפסקה', preheader: '', fromName: 'נ', fromEmail: 'office@nekuda.test', replyTo: '', mode: 'blocks', design: dp, listIds: [Lp] });
+    await ok('PUT', '/api/settings', { pauseShabbat: '1', pauseRanges: [{ from: '2026-12-01T08:00', to: '2026-12-03T20:00', note: 'חג' }, { from: 'bad', to: 'bad' }], archiveEnabled: '0' });
+    assert.equal(JSON.parse((await ok('GET', '/api/settings')).pauseRanges).length, 1);
+    await ok('POST', `/api/campaigns/${cp}/send`, { public: true });
+    assert.equal(app.db.setting('archiveEnabled'), '1', 'סימון לארכיון מפעיל את הארכיון');
+    const fromP = received.length;
+    app.worker.clock = () => at('2026-11-21T08:00:00Z');
+    assert.equal(await app.worker.tick(), 0);
+    assert.equal(received.length, fromP, 'בשבת לא נשלח כלום');
+    assert.match(app.worker.state.paused, /שבת/);
+    assert.equal(app.db.get('SELECT status FROM campaigns WHERE id=?', cp).status, 'sending');
+    app.worker.clock = () => at('2026-11-22T08:00:00Z');
+    await app.worker.tick();
+    assert.equal(received.length, fromP + 2, 'אחרי ההפסקה השליחה ממשיכה');
+    assert.equal(app.worker.state.paused, '');
+    await app.worker.tick();
+    assert.equal(app.db.get('SELECT status FROM campaigns WHERE id=?', cp).status, 'sent');
+    app.worker.clock = null;
+    await ok('PUT', '/api/settings', { pauseShabbat: '0', pauseRanges: [] });
+
+    // כפתור PDF בתוך הגליון
+    const [, hp] = decodeParts(received.at(-1).data);
+    const pdfLink = hp.match(/href="[^"]*(\/pdf\/[\w.-]+)"/)[1];
+    const pr = await fetch(base + pdfLink);
+    if (meta3.pdf) {
+      assert.equal(pr.status, 200);
+      assert.equal(Buffer.from(await pr.arrayBuffer()).subarray(0, 5).toString(), '%PDF-');
+      assert.equal(fs.readdirSync(path.join(dataDir, 'pdf-cache')).filter((f) => f.startsWith(`${cp}-`)).length, 1, 'ה-PDF נשמר לשימוש חוזר');
+    } else assert.equal(pr.status, 503);
+    assert.equal((await fetch(base + '/pdf/1.1.forged')).status, 400);
+
+    // ארכיון: הורדה כ-PDF, עריכת גליון שנשלח, והסרה
+    const arch = await ok('GET', '/archive');
+    assert.ok(arch.includes(`/archive/${cp}/pdf`) && arch.includes('גליון בהפסקה'));
+    assert.equal((await fetch(`${base}/archive/${cp}/pdf`)).status, meta3.pdf ? 200 : 503);
+    const preparedBefore = app.db.get('SELECT prepared_html FROM campaigns WHERE id=?', cp).prepared_html;
+    dp.blocks[0].html = '<p>נוסח מתוקן לארכיון</p>';
+    const ed = await ok('PUT', `/api/campaigns/${cp}`, { subject: 'גליון מתוקן', preheader: '', mode: 'blocks', design: dp, fromEmail: 'hacker@evil.test', listIds: [] });
+    assert.equal(ed.archive, true);
+    const after = app.db.get('SELECT prepared_html, subject, from_email, status FROM campaigns WHERE id=?', cp);
+    assert.deepEqual([after.prepared_html === preparedBefore, after.subject, after.from_email, after.status], [true, 'גליון מתוקן', 'office@nekuda.test', 'sent'], 'מה שנשלח לא משתנה');
+    const archOne2 = await ok('GET', `/archive/${cp}`);
+    assert.ok(archOne2.includes('נוסח מתוקן לארכיון') && !archOne2.includes('{{') && !archOne2.includes('גליון עם PDF'));
+    assert.ok((await ok('GET', `/v/${pdfLink.split('/').pop()}`)).includes('גליון עם PDF'), 'הקישור "צפייה בדפדפן" של הנמען מציג את מה שנשלח');
+    await ok('POST', `/api/campaigns/${cp}/public`, { public: false });
+    assert.equal((await call('GET', `/archive/${cp}`)).status, 404);
+
+    // מחיקה: רק מנהל, ורק עם משפט האישור
+    assert.equal((await call('DELETE', `/api/campaigns/${cp}`, undefined, { noConfirm: true })).status, 400, 'בלי משפט האישור');
+    assert.equal((await call('DELETE', `/api/campaigns/${cp}`, undefined, { noConfirm: true, headers: { 'X-Confirm-Delete': encodeURIComponent('כן') } })).status, 400);
+    assert.equal((await call('POST', '/api/subscribers/bulk', { filter: { list: Lp }, action: 'delete' })).status, 400);
+    const someSub = app.db.get("SELECT id FROM subscribers WHERE email='p1@pause.org'").id;
+    assert.equal((await call('DELETE', `/api/subscribers/${someSub}`, undefined, { noConfirm: true })).status, 400);
+    await ok('PUT', `/api/users/${editorId}`, { username: 'editor', email: 'editor@gmail.com', role: 'user', active: true, perms: ['campaigns.view', 'campaigns.edit', 'subscribers.view', 'subscribers.edit', 'lists.view', 'lists.edit', 'users.manage', 'settings.manage'] });
+    cookie = '';
+    await ok('POST', '/api/login', { username: 'editor', password: 'editor-pass-123' });
+    for (const u of [`/api/campaigns/${cp}`, `/api/subscribers/${someSub}`, `/api/lists/${Lp}`, `/api/users/${meId}`]) assert.equal((await call('DELETE', u)).status, 403, `${u}: מי שאינו מנהל לא מוחק גם עם כל ההרשאות`);
+    assert.equal((await call('POST', '/api/subscribers/bulk', { filter: { list: Lp }, action: 'delete', confirm: 'מאושר למחיקה' })).status, 403);
+    assert.equal((await call('GET', '/api/backups')).status, 403, 'גיבויים למנהל בלבד');
+    cookie = adminCookie;
+    await ok('DELETE', `/api/subscribers/${someSub}`);
+    await ok('DELETE', `/api/campaigns/${cp}`);
+
+    // גיבוי
+    const bk = await ok('POST', '/api/backups', {});
+    assert.match(bk.name, /^backup-\d{4}-\d{2}-\d{2}_\d{4}\.tar\.gz$/);
+    assert.ok(bk.size > 1000 && (await ok('GET', '/api/backups'))[0].name === bk.name);
+    const dl = await fetch(`${base}/api/backups/${bk.name}`, { headers: { Cookie: cookie } });
+    const buf = Buffer.from(await dl.arrayBuffer());
+    assert.ok(dl.status === 200 && buf[0] === 0x1f && buf[1] === 0x8b, 'קובץ gzip');
+    const { spawnSync } = await import('node:child_process');
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'nm-restore-'));
+    fs.writeFileSync(path.join(out, 'b.tar.gz'), buf);
+    assert.equal(spawnSync('tar', ['-xzf', path.join(out, 'b.tar.gz'), '-C', out]).status, 0);
+    const { DatabaseSync } = await import('node:sqlite');
+    const copy = new DatabaseSync(path.join(out, 'mailer.db'));
+    assert.equal(Number(copy.prepare('SELECT COUNT(*) n FROM subscribers').get().n), Number(app.db.get('SELECT COUNT(*) n FROM subscribers').n), 'הגיבוי נפתח ומכיל את הנמענים');
+    copy.close();
+    assert.ok(fs.existsSync(path.join(out, 'uploads')) || !fs.existsSync(path.join(dataDir, 'uploads')));
+    fs.rmSync(out, { recursive: true, force: true });
+    assert.equal((await call('GET', '/api/backups/..%2Fmailer.db')).status, 404);
+  }
+  step('הפסקות שליחה, PDF לנמענים ובארכיון, עריכת גליון שנשלח, מחיקה מוגנת וגיבוי שנפתח');
 
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
