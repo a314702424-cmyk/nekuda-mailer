@@ -856,6 +856,92 @@ try {
   }
   step('הפסקות שליחה, PDF לנמענים ובארכיון, עריכת גליון שנשלח, מחיקה מוגנת וגיבוי שנפתח');
 
+  // --- גרסה 0.9.0: ייבוא מהמערכת הישנה ועדכון המערכת ---
+  {
+    const { parseHebrewDate, parseListing, safeUrl } = await import('../src/legacy.js');
+    assert.equal(new Date(parseHebrewDate('נשלח ב 24 אוקטובר 2026') * 1000).toISOString().slice(0, 10), '2026-10-24');
+    assert.equal(new Date(parseHebrewDate('נשלח ב 26 מרס 2026') * 1000).toISOString().slice(0, 10), '2026-03-26');
+    assert.equal(parseHebrewDate('בלי תאריך'), 0);
+    assert.equal(safeUrl('file:///etc/passwd'), null);
+    assert.equal(safeUrl('http://127.0.0.1/x'), null, 'כתובת פנימית נחסמת');
+    assert.equal(safeUrl('http://169.254.169.254/latest'), null);
+    assert.ok(safeUrl('https://newsletter.nekuda.org.il/index.php?option=com_acymailing&ctrl=archive'));
+
+    // אתר ישן מדומה, במבנה של ארכיון AcyMailing: קישורים ב-onclick, תאריך ב-sentondate, תוכן ב-newsletter_preview_area
+    const httpMod = await import('node:http');
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+    const row = (id, title, date) => `<span class="acyarchivetitle"><a onclick="acymailing.openpopup('/index.php/component/acymailing/listid-4/mailid-${id}-78?tmpl=component&amp;x=1', 800, 600); return false;" class="acymailingpopup ">${title}</a></span><span class="sentondate">נשלח ב ${date}</span>`;
+    const old = httpMod.createServer((req, res) => {
+      const u = new URL(req.url, 'http://x');
+      if (u.pathname === '/logo.png') { res.setHeader('Content-Type', 'image/png'); return res.end(png); }
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      if (u.searchParams.get('ctrl') === 'archive') {
+        if (u.searchParams.get('limitstart') !== '0') return res.end('<table><tr><td></td></tr></table>');
+        return res.end(`<html><body><form><table><tr><td>${row(200, 'על הגלות של ספר &#039;ארבעה טורים&#039; &amp; עוד', '24 אוקטובר 2026')}${row(200, 'על הגלות של ספר &#039;ארבעה טורים&#039; &amp; עוד', '24 אוקטובר 2026')}${row(150, 'טיוטות של 50 שנה', '26 מרס 2026')}${row(99, 'גליון שבור', '01 ינואר 2026')}</td></tr></table><a href="/index.php/archive">ארכיון</a></form></body></html>`);
+      }
+      const id = (/mailid-(\d+)/.exec(u.pathname) || [])[1];
+      if (id === '99') return res.end('<html><body><div id="acyarchiveview"><div id="newsletter_preview_area" class="newsletter_body"></div></div></body></html>');
+      res.end(`<html><head><title>x</title></head><body><div id="system-message-container"></div><div id="acyarchiveview"><div id="newsletter_preview_area" class="newsletter_body"><div><div><p onclick="evil()">תוכן גליון ישן מספר ${id}</p><img src="/logo.png" alt="לוגו"><img src="https://other.example/x.png"><a href="/index.php/page">קישור יחסי</a><script>bad()</script></div></div></div><p>מחוץ לגליון</p></div><input type="hidden"></body></html>`);
+    });
+    const oldBase = `http://127.0.0.1:${await listen(old)}`;
+    const archiveUrl = `${oldBase}/index.php?option=com_acymailing&ctrl=archive`;
+    assert.equal(parseListing(`<td>${row(7, 'א', '01 מאי 2026')}</td>`, 'https://newsletter.nekuda.org.il/index.php')[0].url, 'https://newsletter.nekuda.org.il/index.php/component/acymailing/listid-4/mailid-7-78?tmpl=component&x=1');
+    try {
+      assert.equal((await call('POST', '/api/legacy/scan', { url: archiveUrl })).status, 502, 'בלי אישור מפורש אין גישה לכתובת פנימית');
+      process.env.NM_ALLOW_LOCAL = '1';
+      const scan = await ok('POST', '/api/legacy/scan', { url: archiveUrl });
+      assert.deepEqual(scan.items.map((i) => [i.id, i.subject, i.exists]), [[200, "על הגלות של ספר 'ארבעה טורים' & עוד", false], [150, 'טיוטות של 50 שנה', false], [99, 'גליון שבור', false]], 'בלי כפילויות, מהחדש לישן');
+      const imp = await ok('POST', '/api/legacy/import', { items: scan.items, public: true });
+      assert.deepEqual(imp.results.map((r) => [r.id, r.ok]), [[200, true], [150, true], [99, false]]);
+      assert.deepEqual([imp.results[0].images, imp.results[0].missing], [1, 0]);
+      const rowDb = app.db.get('SELECT * FROM campaigns WHERE id=?', imp.results[0].campaignId);
+      assert.deepEqual([rowDb.status, rowDb.public, rowDb.mode, new Date(rowDb.finished_at * 1000).toISOString().slice(0, 10)], ['sent', 1, 'html', '2026-10-24']);
+      assert.ok(rowDb.html.includes('תוכן גליון ישן מספר 200') && !rowDb.html.includes('מחוץ לגליון') && !/script|onclick/.test(rowDb.html));
+      const mediaName = (rowDb.html.match(/\/media\/(old-[0-9a-f]+\.png)/) || [])[1];
+      assert.ok(mediaName && fs.existsSync(path.join(dataDir, 'uploads', mediaName)), 'התמונה הועתקה לשרת החדש');
+      assert.ok(rowDb.html.includes('https://other.example/x.png') && rowDb.html.includes(`href="${oldBase}/index.php/page"`), 'תמונה מאתר אחר נשארת, וקישור יחסי הופך למלא');
+      const archNow = await ok('GET', '/archive');
+      assert.ok(archNow.includes('ארבעה טורים') && archNow.includes('24.10.2026'));
+      assert.ok((await ok('GET', `/archive/${rowDb.id}`)).includes('תוכן גליון ישן מספר 200'));
+      const again = await ok('POST', '/api/legacy/scan', { url: archiveUrl });
+      assert.deepEqual(again.items.map((i) => i.exists), [true, true, false]);
+      assert.equal((await ok('POST', '/api/legacy/import', { items: scan.items.slice(0, 1) })).results[0].skipped, true, 'ייבוא חוזר לא יוצר כפילות');
+      assert.ok((await ok('GET', '/api/campaigns')).find((x) => x.id === rowDb.id).imported);
+      cookie = '';
+      await ok('POST', '/api/login', { username: 'editor', password: 'editor-pass-123' });
+      assert.equal((await call('POST', '/api/legacy/scan', { url: archiveUrl })).status, 403);
+      assert.equal((await call('GET', '/api/system/update')).status, 403);
+      assert.equal((await call('POST', '/api/system/update', {})).status, 403);
+      cookie = adminCookie;
+    } finally { delete process.env.NM_ALLOW_LOCAL; old.close(); }
+
+    // עדכון מהמאגר: מאגר מקומי עם גרסה חדשה, ועותק מותקן שמאחוריו
+    const { updateStatus, pullUpdate } = await import('../src/update.js');
+    const { spawnSync } = await import('node:child_process');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nm-upd-'));
+    const g = (dir, ...args) => { const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' }); assert.equal(r.status, 0, args.join(' ') + ': ' + r.stderr); return r.stdout; };
+    const origin = path.join(tmp, 'origin'); const inst = path.join(tmp, 'installed');
+    fs.mkdirSync(origin);
+    g(origin, 'init', '-q', '-b', 'main'); g(origin, 'config', 'user.email', 't@t'); g(origin, 'config', 'user.name', 't');
+    fs.writeFileSync(path.join(origin, 'package.json'), '{"version":"1.0.0"}'); g(origin, 'add', '.'); g(origin, 'commit', '-qm', 'v1');
+    g(tmp, 'clone', '-q', origin, inst);
+    assert.deepEqual([updateStatus(inst).current, updateStatus(inst).behind], ['1.0.0', 0]);
+    fs.writeFileSync(path.join(origin, 'package.json'), '{"version":"1.1.0"}'); g(origin, 'commit', '-qam', 'v1.1');
+    const st9 = updateStatus(inst);
+    assert.deepEqual([st9.supported, st9.current, st9.available, st9.behind, st9.dirty], [true, '1.0.0', '1.1.0', 1, false]);
+    assert.deepEqual(pullUpdate(inst), { ok: true, from: '1.0.0', to: '1.1.0', changed: true });
+    assert.equal(updateStatus(inst).behind, 0);
+    fs.writeFileSync(path.join(inst, 'package.json'), '{"version":"local-edit"}');
+    fs.writeFileSync(path.join(origin, 'package.json'), '{"version":"1.2.0"}'); g(origin, 'commit', '-qam', 'v1.2');
+    const bad9 = pullUpdate(inst);
+    assert.ok(!bad9.ok && /שום קובץ לא שונה/.test(bad9.error), 'שינוי מקומי שמתנגש: העדכון נעצר בלי לדרוס');
+    assert.equal(fs.readFileSync(path.join(inst, 'package.json'), 'utf8'), '{"version":"local-edit"}');
+    assert.equal(updateStatus(path.join(tmp, 'origin', '..', 'nope')).supported, false);
+    fs.rmSync(tmp, { recursive: true, force: true });
+    assert.equal((await call('POST', '/api/system/update', {})).status, 400, 'בלי משפט האישור אין עדכון');
+  }
+  step('ייבוא גליונות מהארכיון של המערכת הישנה, ועדכון המערכת מהמאגר');
+
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
   smtp.close();
