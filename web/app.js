@@ -112,7 +112,7 @@ function campaignTable(rows) {
     rows.map((c) => {
       const editable = ['draft', 'scheduled', 'paused'].includes(c.status);
       return h('tr', {},
-        h('td', {}, h('a', { href: editable && can('campaigns.edit') ? `#/campaign/${c.id}` : `#/stats/${c.id}` }, c.subject || '(ללא נושא)'), c.auto ? h('span', { class: 'tag', style: 'margin-inline-start:6px' }, 'אוטומציה') : null),
+        h('td', {}, h('a', { href: editable && can('campaigns.edit') ? `#/campaign/${c.id}` : `#/stats/${c.id}` }, c.subject || '(ללא נושא)'), c.auto ? h('span', { class: 'tag', style: 'margin-inline-start:6px' }, 'אוטומציה') : null, c.imported ? h('span', { class: 'tag', style: 'margin-inline-start:6px' }, 'יובא מהמערכת הישנה') : null),
         h('td', {}, tag(CAMP_STATUS, c.status)),
         h('td', { class: 'num' }, `${fmt(c.stats.sent)} / ${fmt(c.stats.total)}`),
         h('td', { class: 'num' }, pct(c.stats.opened, c.stats.sent)),
@@ -153,6 +153,7 @@ async function campaignsPage() {
   const create = (mode, template) => safe(async () => { const r = await api('POST', '/campaigns', { mode, template }); location.hash = `#/campaign/${r.id}`; });
   shell([
     h('div', { class: 'bar' }, h('h1', {}, 'גליונות'),
+      isAdmin() ? h('button', { onclick: legacyImport }, 'ייבוא מהמערכת הישנה') : null,
       can('campaigns.edit') ? [h('button', { onclick: create('html') }, 'גליון מ-HTML מוכן'), h('button', { title: 'טקסט פשוט בלי עיצוב כבד', onclick: create('blocks', 'letter') }, 'מכתב אישי'),
         h('button', { title: 'כותרת, דבר המערכת, מדורים וקריאה לפעולה', onclick: create('blocks', 'newsletter') }, 'תבנית גליון מלא'),
         h('button', { class: 'primary', onclick: create('blocks') }, 'גליון חדש')] : null),
@@ -521,6 +522,51 @@ async function queuePage() {
   ]);
 }
 
+// ---------- ייבוא גליונות מהמערכת הישנה ----------
+function legacyImport() {
+  const url = h('input', { type: 'url', class: 'ltr', value: 'https://newsletter.nekuda.org.il/index.php?option=com_acymailing&ctrl=archive' });
+  const pub = h('input', { type: 'checkbox', checked: true });
+  const out = h('div');
+  let items = [];
+  const scan = h('button', { onclick: async () => {
+    scan.disabled = true; out.replaceChildren(h('p', { class: 'muted' }, 'סורק את הארכיון של המערכת הישנה…'));
+    try {
+      items = (await api('POST', '/legacy/scan', { url: url.value })).items;
+      const fresh = items.filter((i) => !i.exists);
+      const boxes = new Map();
+      const table = h('div', { class: 'scroll', style: 'max-height:320px;overflow:auto' }, h('table', { class: 'data' },
+        h('tr', {}, ['', 'נושא', 'נשלח', ''].map((t) => h('th', {}, t))),
+        items.map((i) => { const cb = h('input', { type: 'checkbox', checked: !i.exists, disabled: i.exists }); boxes.set(i.id, cb);
+          return h('tr', {}, h('td', {}, cb), h('td', {}, i.subject), h('td', { class: 'num' }, i.at ? new Date(i.at * 1000).toLocaleDateString('he-IL') : ''), h('td', { class: 'muted' }, i.exists ? 'כבר יובא' : '')); })));
+      const status = h('p', { class: 'muted' });
+      const go = h('button', { class: 'primary', disabled: !fresh.length, onclick: async () => {
+        const chosen = items.filter((i) => boxes.get(i.id).checked && !i.exists);
+        if (!chosen.length) { toast('לא נבחרו גליונות', true); return; }
+        go.disabled = true; scan.disabled = true;
+        let done = 0; let failed = 0; let noImages = 0;
+        // חמישה בכל בקשה, כדי שייבוא ארוך לא ייקטע באמצע
+        for (let k = 0; k < chosen.length; k += 5) {
+          status.textContent = `מייבא ${Math.min(k + 5, chosen.length)} מתוך ${chosen.length}…`;
+          try {
+            const r = await api('POST', '/legacy/import', { items: chosen.slice(k, k + 5), public: pub.checked });
+            for (const x of r.results) { if (x.ok) { done++; if (x.missing) noImages++; const row = boxes.get(x.id); row.checked = false; row.disabled = true; } else failed++; }
+          } catch (e) { failed += Math.min(5, chosen.length - k); status.textContent = e.message; }
+        }
+        status.textContent = `יובאו ${done} גליונות.${failed ? ` ${failed} נכשלו, ואפשר לנסות אותם שוב.` : ''}${noImages ? ` ב-${noImages} מהם חלק מהתמונות נשארו באתר הישן.` : ''}`;
+        go.disabled = false; scan.disabled = false;
+        toast(`יובאו ${done} גליונות`);
+      } }, 'ייבוא הגליונות המסומנים');
+      out.replaceChildren(h('p', {}, `נמצאו ${items.length} גליונות, מהם ${fresh.length} שעוד לא יובאו.`), table,
+        h('label', { class: 'inline-check', style: 'margin-top:10px' }, pub, 'להעלות את הגליונות המיובאים לעמוד הציבורי (/archive)'),
+        h('div', { class: 'row', style: 'margin-top:10px' }, go), status);
+    } catch (e) { out.replaceChildren(h('p', { class: 'notice bad' }, e.message)); } finally { scan.disabled = false; }
+  } }, 'סריקת הארכיון');
+  dialog('ייבוא גליונות מהמערכת הישנה', h('div', { style: 'min-width:min(760px,90vw)' },
+    h('p', { class: 'muted' }, 'הייבוא קורא את דף הארכיון הציבורי של המערכת הישנה, בלי סיסמאות ובלי לשנות שם דבר. כל גליון נשמר כאן כגליון שנשלח, עם התאריך המקורי שלו, והתמונות שלו מועתקות לשרת הזה. נמענים ונתוני פתיחות לא מיובאים.'),
+    h('div', { class: 'row' }, h('div', { class: 'grow' }, field('כתובת דף הארכיון במערכת הישנה', url)), h('div', {}, field('\u00a0', scan))), out),
+  (close) => [h('button', { onclick: () => { close(); route(); } }, 'סגירה')]);
+}
+
 // ---------- אוטומציות ----------
 async function automationsPage() {
   const [rows, camps] = await Promise.all([api('GET', '/automations'), api('GET', '/campaigns'), loadLists()]);
@@ -794,6 +840,37 @@ async function settingsPage() {
         h('button', { type: 'button', class: 'small', onclick: () => { ranges.push({ from: '', to: '', note: '' }); draw(); } }, '+ הוספת הפסקה'),
         h('p', { class: 'muted small-note' }, 'ההפסקות נשמרות בלחיצה על "שמירת הגדרות". הפסקה שהתאריכים שלה לא מלאים, או שסופה לפני תחילתה, לא נשמרת.'));
     })(),
+    isAdmin() ? (() => {
+      const box = h('div', {}, 'בודק אם יש גרסה חדשה…');
+      const load = safe(async () => {
+        const u = await api('GET', '/system/update');
+        if (!u.supported) { box.replaceChildren(h('p', { class: 'muted' }, u.reason)); return; }
+        const typed = h('input', { type: 'text', autocomplete: 'off', placeholder: 'מאושר לעדכון', style: 'max-width:200px' });
+        const go = h('button', { type: 'button', class: 'primary', disabled: true, onclick: async () => {
+          go.disabled = true; go.textContent = 'מעדכן…';
+          try {
+            const r = await api('POST', '/system/update', {}, { headers: { 'X-Confirm-Update': encodeURIComponent(typed.value.trim()) } });
+            if (!r.restarting) { toast('המערכת כבר מעודכנת'); load(); return; }
+            box.replaceChildren(h('p', { class: 'notice' }, `הגרסה עודכנה מ-${r.from} ל-${r.to}. המערכת מופעלת מחדש, והדף ייטען לבד בעוד רגע.`));
+            // מחכים שהשרת יעלה בגרסה החדשה, ואז טוענים את הדף מחדש
+            for (let i = 0; i < 40; i++) {
+              await new Promise((ok) => setTimeout(ok, 1500));
+              try { const m = await fetch('/api/meta', { cache: 'no-store' }).then((x) => x.json()); if (m.version === r.to) { location.reload(); return; } } catch { /* השרת עוד לא עלה */ }
+            }
+            box.append(h('p', { class: 'notice bad' }, 'השרת לא חזר בזמן הצפוי. כדאי לרענן את הדף בעוד דקה, ואם האתר לא עולה, לבדוק את השירות בשרת.'));
+          } catch (e) { toast(e.message, true); go.disabled = false; go.textContent = 'עדכון עכשיו'; }
+        } }, 'עדכון עכשיו');
+        typed.oninput = () => { go.disabled = typed.value.trim() !== 'מאושר לעדכון'; };
+        box.replaceChildren(
+          h('p', {}, `הגרסה המותקנת: ${u.current}. `, u.error ? u.error : u.behind ? h('b', {}, `במאגר מחכה גרסה ${u.available || 'חדשה'} (${u.behind} עדכונים).`) : 'זו הגרסה העדכנית שבמאגר.'),
+          u.dirty ? h('p', { class: 'notice' }, 'יש בשרת קבצים ששונו ידנית. אם העדכון יתנגש בהם, הוא ייעצר בלי לשנות דבר.') : null,
+          u.behind ? h('div', { class: 'row' }, h('div', {}, field('כדי לאשר, יש להקליד: מאושר לעדכון', typed)), h('div', {}, field('\u00a0', go))) : h('button', { type: 'button', class: 'small', onclick: load }, 'בדיקה שוב'));
+      });
+      load();
+      return h('div', { class: 'card' }, h('h2', {}, 'עדכון המערכת'),
+        h('p', { class: 'muted' }, 'מושך את הגרסה החדשה מהמאגר בגיטהאב ומפעיל את המערכת מחדש. ההפעלה לוקחת כמה שניות. גליון שבאמצע שליחה ממשיך מאותה נקודה, והנתונים לא נפגעים. לפני עדכון כדאי ליצור גיבוי.'),
+        box);
+    })() : null,
     isAdmin() ? (() => {
       const box = h('div', {}, 'טוען…');
       const size = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + 'MB' : Math.ceil(n / 1024) + 'KB');
