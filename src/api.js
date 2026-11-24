@@ -18,6 +18,15 @@ import { scanArchive, fetchNewsletter, safeUrl } from './legacy.js';
 import { updateStatus, pullUpdate } from './update.js';
 import { ask, testKey, cleanHtml, cleanKey, parseJson, AiError } from './ai.js';
 
+/** הכתובות הקבועות לשליחת בדיקה, כפי שהמנהל הגדיר: עד עשר כתובות תקינות, בלי כפילויות. */
+export function testRecipients(db) {
+  const seen = new Set();
+  for (const e of String(db.setting('testRecipients') || '').split(/[\s,;]+/)) {
+    const v = e.trim().toLowerCase();
+    if (v && isEmail(v)) seen.add(v);
+  }
+  return [...seen].slice(0, 10);
+}
 export const CONFIRM_DELETE = 'מאושר למחיקה';
 /** הגנה כפולה על מחיקה: רק מנהל מערכת, ורק אחרי הקלדת משפט האישור. */
 function guardDelete(user, typed) {
@@ -144,6 +153,7 @@ export function registerApi(router, { db, worker, version, restart = null }) {
       pdf: !!chromePath(),
       fields: user ? customFields(db) : [],
       ai: !!(user && db.setting('aiKey')),
+      testRecipients: user && user.can('campaigns.edit') ? testRecipients(db) : [],
     });
   });
 
@@ -636,11 +646,17 @@ export function registerApi(router, { db, worker, version, restart = null }) {
   });
   api('GET', '/campaigns/:id/recipients', ({ res, params }) => json(res, recipientCount(db, getCampaign(params.id).id)));
 
-  api('POST', '/campaigns/:id/test', async ({ res, params, body }) => {
+  api('POST', '/campaigns/:id/test', async ({ res, params, body, user }) => {
     const c = getCampaign(params.id);
-    const emails = (Array.isArray(body.emails) ? body.emails : String(body.emails || '').split(/[\s,;]+/)).map((e) => String(e).trim()).filter(Boolean);
-    need(emails.length && emails.length <= 5, 'יש להזין בין כתובת אחת לחמש');
+    const emails = [...new Set((Array.isArray(body.emails) ? body.emails : String(body.emails || '').split(/[\s,;]+/)).map((e) => String(e).trim().toLowerCase()).filter(Boolean))];
+    need(emails.length && emails.length <= 10, 'יש לבחור בין כתובת אחת לעשר');
     need(emails.every(isEmail), 'אחת הכתובות לא תקינה');
+    // מי שמורשה רק לערוך שולח בדיקה אך ורק לכתובות הקבועות שהמנהל הגדיר. כתובת חופשית דורשת הרשאת שליחה
+    if (user.role !== 'admin' && !user.can('campaigns.send')) {
+      const allowed = testRecipients(db);
+      need(allowed.length, 'המנהל עדיין לא הגדיר כתובות לשליחת בדיקה', 403);
+      need(emails.every((e) => allowed.includes(e)), 'אפשר לשלוח בדיקה רק לכתובות שהמנהל הגדיר', 403);
+    }
     const settings = db.settings();
     const fromEmail = c.from_email || settings.fromEmail;
     need(isEmail(fromEmail), 'חסרה כתובת שולח. הגדר אותה בגליון או בהגדרות');
@@ -1020,6 +1036,7 @@ export function registerApi(router, { db, worker, version, restart = null }) {
         if (!(k in body)) continue;
         if (k === 'smtpPass' && !body.smtpPass && !body.clearSmtpPass) continue;
         if (k === 'googleClientSecret' && !body.googleClientSecret && !body.clearGoogleSecret) continue;
+        if (k === 'testRecipients') { db.setSetting(k, String(body[k] || '').split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter((e, i, a) => e && isEmail(e) && a.indexOf(e) === i).slice(0, 10).join('\n')); continue; }
         if (k === 'pauseRanges') { db.setSetting(k, JSON.stringify(cleanRanges(body[k]))); continue; }
         if (k === 'aiKey' && !body.aiKey && !body.clearAiKey) continue;
         if (k === 'aiKey') { db.setSetting(k, cleanKey(str(body[k], 500))); continue; }
