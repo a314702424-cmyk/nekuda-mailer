@@ -335,7 +335,9 @@ export async function mountBuilder(container, design, opts) {
 
   const list = h('div', { class: 'b-side' });
   let dragFrom = null;
-  const openSet = new WeakSet();
+  // רק בלוק אחד פתוח בכל רגע: פתיחת בלוק סוגרת את הקודם
+  let openOne = null;
+  const openSet = { has: (b) => openOne === b, add: (b) => { openOne = b; }, delete: (b) => { if (openOne === b) openOne = null; } };
   const plain = (x) => String(x || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
   const summary = (b) => { const t = plain(b.text || b.html || b.caption || b.alt || (b.cols || []).map((c) => c.html).join(' ') || (b.links || []).map((l) => l.label).join(' · ')); return t.length > 46 ? t.slice(0, 46) + '…' : t; };
   function openBlock(i, scroll = true) {
@@ -393,9 +395,8 @@ export async function mountBuilder(container, design, opts) {
           tool('מחק', 'מחיקת הבלוק', () => { design.blocks.splice(i, 1); drawBlocks(); changed(); }, 'small danger')),
         isOpen ? h('div', { class: 'body' }, body) : null);
     }));
-    list.prepend(h('div', { class: 'row' }, h('span', { class: 'muted grow small-note' }, 'לחיצה על בלוק בתצוגה המקדימה, או על שמו כאן, פותחת אותו לעריכה.'),
-      h('button', { type: 'button', class: 'small', onclick: () => { design.blocks.forEach((b) => openSet.add(b)); drawBlocks(); } }, 'פתח הכול'),
-      h('button', { type: 'button', class: 'small', onclick: () => { design.blocks.forEach((b) => openSet.delete(b)); drawBlocks(); } }, 'סגור הכול')));
+    list.prepend(h('div', { class: 'row' }, h('span', { class: 'muted grow small-note' }, 'לחיצה על בלוק בתצוגה המקדימה, או על שמו כאן, פותחת אותו לעריכה וסוגרת את הקודם.'),
+      h('button', { type: 'button', class: 'small', onclick: () => { openOne = null; drawBlocks(); } }, 'סגירת הבלוק הפתוח')));
     if (!design.blocks.length) list.append(h('p', { class: 'muted' }, 'אין בלוקים. הוסף בלוק מהכפתורים למעלה.'));
   }
   const insertAt = () => { const f = design.blocks.findIndex((b) => b.type === 'footer'); return f >= 0 ? f : design.blocks.length; };

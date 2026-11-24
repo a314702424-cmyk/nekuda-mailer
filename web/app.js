@@ -260,14 +260,29 @@ async function campaignPage(id) {
   [fromName, fromEmail, replyTo, utm, subjectB].forEach((el) => el.addEventListener('input', touch));
 
   const sendTest = safe(async () => {
+    const fixed = state.meta.testRecipients || [];
+    const free = isAdmin() || can('campaigns.send'); // כתובת חופשית רק למי שמורשה לשלוח
+    let last = [];
+    try { last = JSON.parse(localStorage.getItem('nm-test-to') || '[]'); } catch { last = []; }
+    const boxes = fixed.map((e) => ({ email: e, el: h('input', { type: 'checkbox', checked: last.includes(e) }) }));
     const emails = text('', { class: 'ltr', placeholder: 'name@example.com' });
-    dialog('שליחת בדיקה', field('כתובות לבדיקה (עד חמש, מופרדות בפסיק)', emails), (close) => [
+    dialog('שליחת בדיקה', h('div', {},
+      fixed.length ? [h('label', {}, 'לאילו כתובות לשלוח את הבדיקה'), h('div', { class: 'checks' }, boxes.map((b) => h('label', { class: 'ltr' }, b.el, b.email))),
+        h('div', { class: 'row', style: 'margin:6px 0 10px' }, h('button', { type: 'button', class: 'small', onclick: () => boxes.forEach((b) => { b.el.checked = true; }) }, 'סימון הכול'),
+          h('button', { type: 'button', class: 'small', onclick: () => boxes.forEach((b) => { b.el.checked = false; }) }, 'ניקוי'))]
+        : h('p', { class: free ? 'muted' : 'notice' }, free ? 'לא הוגדרו כתובות קבועות לבדיקה. אפשר להגדיר עד עשר במסך ההגדרות, ואז לבחור אותן כאן בתיבת סימון.' : 'המנהל עדיין לא הגדיר כתובות לשליחת בדיקה. יש לפנות אליו.'),
+      free ? field(fixed.length ? 'כתובות נוספות (לא חובה, מופרדות בפסיק)' : 'כתובות לבדיקה (מופרדות בפסיק)', emails) : null), (close) => [
       h('button', { onclick: close }, 'ביטול'),
-      h('button', { class: 'primary', onclick: safe(async () => {
+      h('button', { class: 'primary', disabled: !fixed.length && !free, onclick: safe(async () => {
+        const picked = boxes.filter((b) => b.el.checked).map((b) => b.email);
+        const all = [...new Set([...picked, ...emails.value.split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter(Boolean)])];
+        if (!all.length) { toast('לא נבחרה כתובת', true); return; }
+        if (all.length > 10) { toast('אפשר לשלוח בדיקה לעשר כתובות לכל היותר', true); return; }
+        try { localStorage.setItem('nm-test-to', JSON.stringify(picked)); } catch { /* בלי אחסון מקומי: פשוט לא זוכרים את הבחירה */ }
         await save(true);
-        const r = await api('POST', `/campaigns/${id}/test`, { emails: emails.value });
+        const r = await api('POST', `/campaigns/${id}/test`, { emails: all });
         const failed = r.results.filter((x) => !x.ok);
-        toast(failed.length ? `נכשל: ${failed.map((x) => `${x.email} (${x.error})`).join(', ')}` : 'הבדיקה נשלחה', !!failed.length);
+        toast(failed.length ? `נכשל: ${failed.map((x) => `${x.email} (${x.error})`).join(', ')}` : `הבדיקה נשלחה ל-${all.length} כתובות`, !!failed.length);
         close();
       }) }, 'שלח בדיקה')]);
   });
@@ -819,6 +834,9 @@ async function settingsPage() {
       field('כתובת לקפיצות (Return-Path). המערכת מוסיפה לה מזהה נמען אחרי סימן +', inp('bounceAddress', { class: 'ltr', placeholder: 'bounce@example.org' })),
       field('כתובת פיזית של העסק (מופיעה בתחתית אוטומטית)', inp('companyAddress')),
       ),
+    h('div', { class: 'card' }, h('h2', {}, 'כתובות לשליחת בדיקה'),
+      h('p', { class: 'muted' }, 'עד עשר כתובות קבועות, שורה לכל כתובת. בחלון "שליחת בדיקה" הן מופיעות עם תיבות סימון. משתמש שמורשה לערוך גליונות אבל לא לשלוח יכול לשלוח בדיקה רק לכתובות האלה.'),
+      (f.testRecipients = h('textarea', { class: 'ltr', value: s.testRecipients || '', style: 'min-height:90px', placeholder: 'office@nekuda.org.il\nname@gmail.com' }))),
     (() => {
       let ranges = [];
       try { ranges = JSON.parse(s.pauseRanges || '[]'); } catch { ranges = []; }
