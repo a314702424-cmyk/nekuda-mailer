@@ -942,6 +942,41 @@ try {
   }
   step('ייבוא גליונות מהארכיון של המערכת הישנה, ועדכון המערכת מהמאגר');
 
+  // --- גרסה 0.9.1: שליחת בדיקה לכתובות קבועות ---
+  {
+    await ok('PUT', '/api/settings', { testRecipients: ' Fixed1@Nekuda.test, fixed2@nekuda.test\nלא-כתובת\nfixed1@nekuda.test\n' + Array.from({ length: 12 }, (_, i) => `x${i}@nekuda.test`).join('\n') });
+    const list = (await ok('GET', '/api/meta')).testRecipients;
+    assert.deepEqual([list.length, list[0], list[1]], [10, 'fixed1@nekuda.test', 'fixed2@nekuda.test'], 'עד עשר, בלי כפילויות ובלי כתובות שבורות');
+    const ct = (await ok('POST', '/api/campaigns', {})).id;
+    await ok('PUT', `/api/campaigns/${ct}`, { subject: 'גליון לבדיקה', preheader: '', fromName: 'נ', fromEmail: 'office@nekuda.test', replyTo: '', mode: 'blocks', design: defaultDesign(), listIds: [] });
+    await ok('PUT', `/api/users/${editorId}`, { username: 'editor', email: 'editor@gmail.com', role: 'user', active: true, perms: ['campaigns.view', 'campaigns.edit'] });
+    cookie = '';
+    await ok('POST', '/api/login', { username: 'editor', password: 'editor-pass-123' });
+    assert.equal((await ok('GET', '/api/meta')).testRecipients.length, 10, 'עורך רואה את הרשימה');
+    const n0 = received.length;
+    const sentT = await ok('POST', `/api/campaigns/${ct}/test`, { emails: ['fixed1@nekuda.test', 'FIXED2@nekuda.test'] });
+    assert.deepEqual(sentT.results.map((r) => r.ok), [true, true]);
+    assert.equal(received.length, n0 + 2);
+    assert.ok(received.at(-1).to.includes('fixed2@nekuda.test') && /\[בדיקה\]|=\?UTF-8/.test(received.at(-1).data));
+    assert.equal((await call('POST', `/api/campaigns/${ct}/test`, { emails: ['fixed1@nekuda.test', 'stranger@else.org'] })).status, 403, 'עורך לא שולח לכתובת שלא ברשימה');
+    assert.equal((await call('POST', `/api/campaigns/${ct}/test`, { emails: 'stranger@else.org' })).status, 403);
+    assert.equal(received.length, n0 + 2, 'שום דבר לא נשלח כשאחת הכתובות אסורה');
+    cookie = adminCookie;
+    await ok('PUT', `/api/users/${editorId}`, { username: 'editor', email: 'editor@gmail.com', role: 'user', active: true, perms: ['campaigns.view', 'campaigns.edit', 'campaigns.send'] });
+    cookie = '';
+    await ok('POST', '/api/login', { username: 'editor', password: 'editor-pass-123' });
+    assert.equal((await ok('POST', `/api/campaigns/${ct}/test`, { emails: 'free@else.org' })).results[0].ok, true, 'מי שמורשה לשלוח יכול גם לכתובת חופשית');
+    cookie = adminCookie;
+    assert.equal((await call('POST', `/api/campaigns/${ct}/test`, { emails: Array.from({ length: 11 }, (_, i) => `m${i}@else.org`) })).status, 400, 'עד עשר כתובות בבדיקה');
+    await ok('PUT', '/api/settings', { testRecipients: '' });
+    await ok('PUT', `/api/users/${editorId}`, { username: 'editor', email: 'editor@gmail.com', role: 'user', active: true, perms: ['campaigns.view', 'campaigns.edit'] });
+    cookie = '';
+    await ok('POST', '/api/login', { username: 'editor', password: 'editor-pass-123' });
+    assert.equal((await call('POST', `/api/campaigns/${ct}/test`, { emails: 'fixed1@nekuda.test' })).status, 403, 'בלי רשימה מוגדרת עורך לא שולח בדיקה');
+    cookie = adminCookie;
+  }
+  step('שליחת בדיקה: כתובות קבועות לעורכים, כתובת חופשית רק למורשי שליחה');
+
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
   smtp.close();
