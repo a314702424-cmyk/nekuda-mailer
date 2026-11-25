@@ -27,6 +27,36 @@ const field = (label, control) => h('div', {}, h('label', {}, label), control);
  * מרכיב את בונה הגליונות בתוך container.
  * opts: upload(file), meta(), onChange(), saveBrand(settings), blocks: { list, save, update, remove }, notify(msg, bad)
  */
+/**
+ * שדה קוד צבע ליד דוגם הצבעים: מציג את הקוד של הצבע שנבחר (למשל #1d4ed8), מאפשר להעתיק אותו בלחיצה,
+ * ולהדביק או להקליד קוד בבלוק אחר כדי לקבל בדיוק את אותו צבע.
+ * picker הוא שדה הצבע עצמו, holder הוא האלמנט שמציגים (השדה, או התווית שעוטפת אותו בסרגל הטקסט).
+ */
+export function colorCode(picker, holder = picker) {
+  const norm = (v) => { let t = String(v || '').trim().replace(/^#/, '').toLowerCase(); if (/^[0-9a-f]{3}$/.test(t)) t = t.replace(/./g, '$&$&'); return /^[0-9a-f]{6}$/.test(t) ? '#' + t : ''; };
+  const code = h('input', { type: 'text', class: 'cc-code ltr', value: picker.value, maxlength: 9, spellcheck: false, title: 'קוד הצבע. אפשר להדביק כאן קוד שהועתק מצבע אחר' });
+  const apply = (v) => { const c = norm(v); code.classList.toggle('bad', !c && !!String(v).trim()); if (!c) return false; picker.value = c; picker.dispatchEvent(new Event('input', { bubbles: true })); return true; };
+  // בזמן הקלדה מחילים רק קוד מלא של שש ספרות, כדי לא לקפוץ באמצע. קוד מקוצר (שלוש ספרות) מוחל ב-Enter או ביציאה מהשדה
+  code.addEventListener('input', (e) => { e.stopPropagation(); if (code.value.trim().replace(/^#/, '').length >= 6) apply(code.value); else code.classList.remove('bad'); });
+  code.addEventListener('change', (e) => { e.stopPropagation(); apply(code.value); });
+  code.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(code.value); code.value = picker.value; } });
+  code.addEventListener('blur', () => { code.value = picker.value; code.classList.remove('bad'); });
+  code.addEventListener('focus', () => code.select());
+  picker.addEventListener('input', () => { if (document.activeElement !== code) code.value = picker.value; });
+  picker.addEventListener('change', () => { code.value = picker.value; });
+  const flash = (btn, ok) => { const t = btn.textContent; btn.textContent = ok ? '✓' : '✗'; setTimeout(() => { btn.textContent = t; }, 900); };
+  const copy = h('button', { type: 'button', class: 'small cc-btn', title: 'העתקת קוד הצבע', onclick: async () => {
+    code.value = picker.value;
+    try { await navigator.clipboard.writeText(picker.value); flash(copy, true); }
+    catch { code.focus(); code.select(); let ok = false; try { ok = document.execCommand('copy'); } catch { /* אין הרשאת העתקה */ } flash(copy, ok); }
+  } }, 'העתק');
+  const paste = h('button', { type: 'button', class: 'small cc-btn', title: 'הדבקת קוד צבע שהועתק', onclick: async () => {
+    try { flash(paste, apply(await navigator.clipboard.readText())); code.value = picker.value; }
+    catch { code.focus(); code.select(); }   // הדפדפן לא מרשה לקרוא מהלוח: מדביקים בשדה עם Ctrl+V
+  } }, 'הדבק');
+  return h('span', { class: 'cc' }, holder, code, copy, paste);
+}
+
 export async function mountBuilder(container, design, opts) {
   const { upload, meta, onChange, saveBrand, blocks: store, notify = () => {}, lists: allLists = [], ai = null } = opts;
   let saved = store ? await store.list() : [];
@@ -67,10 +97,13 @@ export async function mountBuilder(container, design, opts) {
   function syncHistButtons() { undoBtn.disabled = cursor <= 0; redoBtn.disabled = cursor >= history.length - 1; }
 
   // ----- פקדי קלט -----
-  const input = (obj, key, type = 'text', extra = {}) => h('input', {
-    type, value: obj[key] ?? '', ...extra,
-    oninput: (e) => { obj[key] = type === 'number' ? Number(e.target.value) : e.target.value; changed(); },
-  });
+  const input = (obj, key, type = 'text', extra = {}) => {
+    const el = h('input', {
+      type, value: obj[key] ?? '', ...extra,
+      oninput: (e) => { obj[key] = type === 'number' ? Number(e.target.value) : e.target.value; changed(); },
+    });
+    return type === 'color' ? colorCode(el) : el;
+  };
   const select = (obj, key, options) => h('select', { onchange: (e) => { obj[key] = e.target.value; changed(); } },
     options.map(([v, t]) => h('option', { value: v, selected: String(obj[key]) === String(v) }, t)));
   const check = (obj, key, text, onflip) => h('label', { class: 'inline-check' },
@@ -135,7 +168,14 @@ export async function mountBuilder(container, design, opts) {
       ondragover: (e) => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); },
       ondrop: (e) => { const f = [...e.dataTransfer.files].find(isImage); if (f) { e.preventDefault(); e.stopPropagation(); area.focus(); insertImage(f); } } });
     area.addEventListener('focus', () => { try { document.execCommand('defaultParagraphSeparator', false, 'p'); } catch { /* דפדפן ישן: נשאר עם ברירת המחדל */ } });
-    const run = (cmd, val) => { area.focus(); document.execCommand(cmd, false, val); sync(); };
+    // אם המיקוד עבר לשדה אחר בסרגל (למשל שדה קוד הצבע), מחזירים קודם את הסימון האחרון שהיה בטקסט
+    const run = (cmd, val) => {
+      const sel = window.getSelection();
+      const inside = sel.rangeCount && area.contains(sel.getRangeAt(0).commonAncestorContainer);
+      const saved = !inside && typeof liveRange === 'function' ? liveRange() : null;
+      if (saved) restore(saved); else area.focus();
+      document.execCommand(cmd, false, val); sync();
+    };
     const insertImage = async (f) => {
       if (f.size > 5 * 1024 * 1024) { notify('התמונה גדולה מ-5MB', true); return; }
       const link = await upload(f);
@@ -231,8 +271,8 @@ export async function mountBuilder(container, design, opts) {
     const tools = h('div', { class: 'rte-tools' },
       btn('B', 'מודגש', () => run('bold'), 'font-weight:bold'), btn('I', 'נטוי', () => run('italic'), 'font-style:italic'), btn('U', 'קו תחתון', () => run('underline'), 'text-decoration:underline'),
       face, size,
-      h('label', { class: 'swatch', title: 'צבע טקסט' }, 'A', h('input', { type: 'color', value: '#1a1a1a', oninput: (e) => run('foreColor', e.target.value) })),
-      h('label', { class: 'swatch mark', title: 'צבע סימון (מרקר)' }, '▇', h('input', { type: 'color', value: '#fff3a3', oninput: (e) => run('hiliteColor', e.target.value) })),
+      (() => { const p = h('input', { type: 'color', value: '#1a1a1a', oninput: (e) => run('foreColor', e.target.value) }); return colorCode(p, h('label', { class: 'swatch', title: 'צבע טקסט' }, 'A', p)); })(),
+      (() => { const p = h('input', { type: 'color', value: '#fff3a3', oninput: (e) => run('hiliteColor', e.target.value) }); return colorCode(p, h('label', { class: 'swatch mark', title: 'צבע סימון (מרקר)' }, '▇', p)); })(),
       btn('🔗 קישור', 'הוספה או עריכה של קישור על הטקסט המסומן', () => {
         const cur = currentLink();
         const u = window.prompt('כתובת הקישור (אתר, או mailto: לכתובת מייל):', cur ? cur.getAttribute('href') : 'https://');
@@ -257,7 +297,7 @@ export async function mountBuilder(container, design, opts) {
       pick2('רווח שורות', 'המרחק בין השורות בפסקה', [['1', 'צפוף (1)'], ['1.3', '1.3'], ['1.6', 'רגיל (1.6)'], ['2', 'כפול (2)'], ['2.5', '2.5'], ['3', '3']], (v) => eachBlock((el) => { el.style.lineHeight = v; })),
       pick2('רווח לפני', 'רווח ריק מעל הפסקה', GAPS, (v) => eachBlock((el) => { el.style.marginTop = v + 'px'; if (!el.style.marginBottom) el.style.marginBottom = '1em'; })),
       pick2('רווח אחרי', 'רווח ריק מתחת לפסקה', GAPS, (v) => eachBlock((el) => { el.style.marginBottom = v + 'px'; if (!el.style.marginTop) el.style.marginTop = '0'; })),
-      h('label', { class: 'swatch', title: 'צבע רקע לפסקה (הצללה)' }, '▤', h('input', { type: 'color', value: '#eef3ff', oninput: (e) => eachBlock((el) => { el.style.backgroundColor = e.target.value; el.style.padding = '6px 10px'; }) })),
+      (() => { const p = h('input', { type: 'color', value: '#eef3ff', oninput: (e) => eachBlock((el) => { el.style.backgroundColor = e.target.value; el.style.padding = '6px 10px'; }) }); return colorCode(p, h('label', { class: 'swatch', title: 'צבע רקע לפסקה (הצללה)' }, '▤', p)); })(),
       btn('☐ מסגרת', 'מסגרת סביב הפסקה (לחיצה נוספת מסירה)', () => eachBlock((el) => { const on = !!el.style.border; el.style.border = on ? '' : '1px solid #9aa3b2'; el.style.padding = on && !el.style.backgroundColor ? '' : '6px 10px'; })),
       btn('בלי רקע', 'הסרת הרקע והמסגרת מהפסקה', () => eachBlock((el) => { el.style.backgroundColor = ''; el.style.border = ''; el.style.padding = ''; })),
       h('span', { class: 'sep' }),
@@ -280,7 +320,7 @@ export async function mountBuilder(container, design, opts) {
   /** צבע רקע לבלוק, עם אפשרות לחזור ל"ללא". */
   function bgField(b) {
     const c = h('input', { type: 'color', value: b.blockBg || design.settings.contentBg, oninput: (e) => { b.blockBg = e.target.value; changed(); } });
-    return field('רקע הבלוק', h('div', { class: 'row' }, c, h('button', { type: 'button', class: 'small', onclick: () => { delete b.blockBg; c.value = design.settings.contentBg; changed(); } }, 'ללא')));
+    return field('רקע הבלוק', h('div', { class: 'row' }, colorCode(c), h('button', { type: 'button', class: 'small', onclick: () => { delete b.blockBg; c.value = design.settings.contentBg; changed(); } }, 'ללא')));
   }
 
   /**

@@ -163,3 +163,15 @@ pre.code{direction:ltr;text-align:left;background:#f4f6fa;border:1px solid var(-
 /* גרסה 0.9.3 */
 .colbox{margin:0 0 12px 0;padding:10px;border:1px solid var(--line);border-radius:10px}
 .colbox .colttl{font-weight:700;display:block;margin-bottom:6px}
+
+/* גרסה 0.9.4: קוד צבע ליד דוגם הצבעים */
+.cc{display:inline-flex;align-items:center;gap:4px;vertical-align:middle;flex-wrap:nowrap}
+.cc .cc-code{width:84px;min-width:0;padding:4px 6px;font-size:13px;font-family:Consolas,monospace;text-align:left}
+.cc .cc-code.bad{border-color:#d33;background:#fff3f3}
+.cc .cc-btn{padding:3px 7px;font-size:12px;white-space:nowrap}
+.cc input[type=color]{flex:0 0 auto;width:42px;min-width:42px}
+.rte-tools .cc{border:1px solid var(--line);border-radius:8px;padding:1px 3px;background:#fafbfd}
+.rte-tools .cc .cc-code{width:74px;padding:2px 4px}
+.fields > *:has(> .cc){grid-column:span 2;min-width:0}
+.fields .cc{display:flex;width:100%}
+.fields .cc .cc-code{flex:1 1 60px}

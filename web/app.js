@@ -1,5 +1,5 @@
 import { defaultDesign, htmlToText } from './shared/render.js';
-import { mountBuilder, h } from './builder.js';
+import { mountBuilder, h, colorCode } from './builder.js';
 import { PERM_GROUPS } from './shared/perms.js';
 
 const app = document.getElementById('app');
@@ -943,7 +943,7 @@ async function settingsPage() {
     h('div', { class: 'card' }, h('h2', {}, 'דף ההרשמה הציבורי'),
       h('p', { class: 'muted' }, 'הדף נמצא בכתובת ', h('a', { href: '/subscribe', target: '_blank' }, '/subscribe'), '. אחרי שמירה אפשר לפתוח אותו ולראות את השינוי.'),
       h('div', { class: 'row' }, h('div', { class: 'grow' }, field('כותרת', inp('formTitle'))), h('div', { class: 'grow' }, field('טקסט הכפתור', inp('formButton'))),
-        h('div', {}, field('צבע הכפתור', inp('formColor', { type: 'color' })))),
+        h('div', {}, field('צבע הכפתור', colorCode(inp('formColor', { type: 'color' }))))),
       field('טקסט פתיחה (לא חובה)', (f.formIntro = h('textarea', { value: s.formIntro || '', style: 'min-height:70px' }))),
       field('הודעה אחרי הרשמה', inp('formSuccess')),
       h('div', { class: 'row' }, h('div', { class: 'grow' }, field('כתובת תמונת לוגו (לא חובה)', inp('formLogo', { class: 'ltr', placeholder: 'https://…' }))),
