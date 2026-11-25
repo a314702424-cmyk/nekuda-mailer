@@ -134,6 +134,7 @@ export async function mountBuilder(container, design, opts) {
       },
       ondragover: (e) => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); },
       ondrop: (e) => { const f = [...e.dataTransfer.files].find(isImage); if (f) { e.preventDefault(); e.stopPropagation(); area.focus(); insertImage(f); } } });
+    area.addEventListener('focus', () => { try { document.execCommand('defaultParagraphSeparator', false, 'p'); } catch { /* דפדפן ישן: נשאר עם ברירת המחדל */ } });
     const run = (cmd, val) => { area.focus(); document.execCommand(cmd, false, val); sync(); };
     const insertImage = async (f) => {
       if (f.size > 5 * 1024 * 1024) { notify('התמונה גדולה מ-5MB', true); return; }
@@ -193,6 +194,40 @@ export async function mountBuilder(container, design, opts) {
       } finally { aiMenu.disabled = false; area.classList.remove('busy'); }
     } }, h('option', { value: '' }, '✨ עוזר AI'), [['write', 'כתוב לפי הנחיה…'], ['improve', 'שפר ניסוח (מסומן או הכול)'], ['shorten', 'קצר'], ['lengthen', 'הרחב'], ['proofread', 'הגהה בלבד'],
       ['formal', 'רשמי יותר'], ['friendly', 'חם ואישי יותר'], ['custom', 'הנחיה חופשית…']].map(([v, t]) => h('option', { value: v }, t)));
+    const GAPS = [['0', '0'], ['6', '6'], ['12', '12'], ['18', '18'], ['24', '24'], ['36', '36'], ['48', '48'], ['72', '72']];
+    const BLOCK = /^(P|DIV|LI|BLOCKQUOTE|H[1-6])$/;
+    /** מפעיל פעולה על כל הפסקאות שהסימון נוגע בהן (או על הפסקה שבה הסמן). טקסט בלי פסקה נעטף קודם בפסקה. */
+    const eachBlock = (fn) => {
+      area.focus();
+      const sel = window.getSelection();
+      const range = sel.rangeCount && area.contains(sel.getRangeAt(0).commonAncestorContainer) ? sel.getRangeAt(0) : liveRange();
+      if (!range) { notify('קודם לוחצים בתוך הפסקה או מסמנים טקסט', true); return; }
+      restore(range);
+      const blockOf = (n) => { while (n && n !== area) { if (n.nodeType === 1 && BLOCK.test(n.tagName)) return n; n = n.parentNode; } return null; };
+      if (!blockOf(range.startContainer)) document.execCommand('formatBlock', false, 'p');
+      const r2 = window.getSelection().getRangeAt(0);
+      const all = [...area.querySelectorAll('p,div,li,blockquote,h1,h2,h3,h4,h5,h6')].filter((el) => r2.intersectsNode(el) && ![...el.children].some((c) => BLOCK.test(c.tagName)));
+      const start = blockOf(r2.startContainer);
+      const targets = all.length ? all : start ? [start] : [];
+      if (!targets.length) { notify('לא נמצאה פסקה לעיצוב', true); return; }
+      targets.forEach(fn);
+      sync();
+    };
+    /** מגדיל או מקטין את הטקסט המסומן, יחסית לגודל הנוכחי שלו. */
+    const resize = (delta) => {
+      area.focus();
+      const sel = window.getSelection();
+      if (!sel.rangeCount || sel.isCollapsed) { notify('קודם מסמנים את הטקסט שרוצים להגדיל או להקטין', true); return; }
+      let n = sel.getRangeAt(0).startContainer; if (n.nodeType !== 1) n = n.parentElement;
+      const now = Math.round(parseFloat(getComputedStyle(n).fontSize)) || 16;
+      const next = Math.max(8, Math.min(72, now + delta));
+      document.execCommand('fontSize', false, '7');
+      area.querySelectorAll('font[size="7"]').forEach((f) => { const sp = document.createElement('span'); sp.style.fontSize = next + 'px'; sp.append(...f.childNodes); f.replaceWith(sp);
+        const r = document.createRange(); r.selectNodeContents(sp); sel.removeAllRanges(); sel.addRange(r); });
+      sync();
+    };
+    const pick2 = (label, title, options, fn) => { const el = h('select', { title, onchange: () => { if (el.value !== '') fn(el.value); el.value = ''; } },
+      h('option', { value: '' }, label), options.map(([v, t]) => h('option', { value: v }, t))); return el; };
     const tools = h('div', { class: 'rte-tools' },
       btn('B', 'מודגש', () => run('bold'), 'font-weight:bold'), btn('I', 'נטוי', () => run('italic'), 'font-style:italic'), btn('U', 'קו תחתון', () => run('underline'), 'text-decoration:underline'),
       face, size,
@@ -210,6 +245,22 @@ export async function mountBuilder(container, design, opts) {
       btn('🖼 תמונה', 'הוספת תמונה בתוך הטקסט. אפשר גם לגרור או להדביק תמונה', () => { area.focus(); pick.click(); }), pick,
       btn('• רשימה', 'רשימת תבליטים', () => run('insertUnorderedList')), btn('1. רשימה', 'רשימה ממוספרת', () => run('insertOrderedList')),
       btn('ימין', 'יישור לימין', () => run('justifyRight')), btn('מרכז', 'יישור למרכז', () => run('justifyCenter')), btn('שמאל', 'יישור לשמאל', () => run('justifyLeft')),
+      btn('לשני הצדדים', 'יישור לשני הצדדים (שורות מלאות, כמו בספר)', () => run('justifyFull')),
+      h('span', { class: 'sep' }),
+      btn('S', 'קו חוצה', () => run('strikeThrough'), 'text-decoration:line-through'),
+      btn('x²', 'כתב עילי', () => run('superscript')), btn('x₂', 'כתב תחתי', () => run('subscript')),
+      btn('A▲', 'הגדלת הטקסט המסומן', () => resize(2)), btn('A▼', 'הקטנת הטקסט המסומן', () => resize(-2)),
+      h('span', { class: 'sep' }),
+      btn('⇤ הזחה', 'הגדלת הזחה של הפסקה', () => run('indent')), btn('הזחה ⇥', 'הקטנת הזחה', () => run('outdent')),
+      btn('¶ ימין־לשמאל', 'כיוון הפסקה: מימין לשמאל (עברית)', () => eachBlock((el) => { el.setAttribute('dir', 'rtl'); el.style.textAlign = ''; })),
+      btn('¶ שמאל־לימין', 'כיוון הפסקה: משמאל לימין (אנגלית)', () => eachBlock((el) => { el.setAttribute('dir', 'ltr'); el.style.textAlign = 'left'; })),
+      pick2('רווח שורות', 'המרחק בין השורות בפסקה', [['1', 'צפוף (1)'], ['1.3', '1.3'], ['1.6', 'רגיל (1.6)'], ['2', 'כפול (2)'], ['2.5', '2.5'], ['3', '3']], (v) => eachBlock((el) => { el.style.lineHeight = v; })),
+      pick2('רווח לפני', 'רווח ריק מעל הפסקה', GAPS, (v) => eachBlock((el) => { el.style.marginTop = v + 'px'; if (!el.style.marginBottom) el.style.marginBottom = '1em'; })),
+      pick2('רווח אחרי', 'רווח ריק מתחת לפסקה', GAPS, (v) => eachBlock((el) => { el.style.marginBottom = v + 'px'; if (!el.style.marginTop) el.style.marginTop = '0'; })),
+      h('label', { class: 'swatch', title: 'צבע רקע לפסקה (הצללה)' }, '▤', h('input', { type: 'color', value: '#eef3ff', oninput: (e) => eachBlock((el) => { el.style.backgroundColor = e.target.value; el.style.padding = '6px 10px'; }) })),
+      btn('☐ מסגרת', 'מסגרת סביב הפסקה (לחיצה נוספת מסירה)', () => eachBlock((el) => { const on = !!el.style.border; el.style.border = on ? '' : '1px solid #9aa3b2'; el.style.padding = on && !el.style.backgroundColor ? '' : '6px 10px'; })),
+      btn('בלי רקע', 'הסרת הרקע והמסגרת מהפסקה', () => eachBlock((el) => { el.style.backgroundColor = ''; el.style.border = ''; el.style.padding = ''; })),
+      h('span', { class: 'sep' }),
       btn('שם הנמען', 'הוספת שם הנמען', () => run('insertText', '{{name}}')),
       btn('שם פרטי', 'הוספת השם הפרטי', () => run('insertText', '{{first_name}}')),
       btn('נקה עיצוב', 'הסרת עיצוב מהטקסט המסומן', () => run('removeFormat')),
@@ -306,7 +357,8 @@ export async function mountBuilder(container, design, opts) {
         field('גודל', select(b, 'size', [['', 'רגיל'], ['s', 'קטן'], ['l', 'גדול']]))), check(b, 'full', 'כפתור לכל רוחב הגליון')];
       case 'columns': return [...b.cols.map((c, i) => h('div', { style: 'margin-bottom:10px' }, h('label', {}, i === 0 ? 'טור ימני' : 'טור שמאלי'), imageField(c), field('טקסט חלופי לתמונה', input(c, 'alt')), richText(c))),
         check(b, 'reverseMobile', 'בנייד: להציג את הטור השמאלי ראשון')];
-      case 'divider': return [h('div', { class: 'fields' }, field('צבע הקו', input(b, 'color', 'color')))];
+      case 'divider': return [h('div', { class: 'fields' }, field('צבע הקו', input(b, 'color', 'color')), field('עובי הקו', input(b, 'thick', 'number', { min: 1, max: 12, value: b.thick || 1 }))),
+        h('p', { class: 'muted small-note' }, 'כדי להרחיק את הקו ממה שמעליו או מתחתיו, משנים את "מרווח מעל" ו"מרווח מתחת" בשורה שלמטה.')];
       case 'spacer': return [h('div', { class: 'fields' }, field('גובה בפיקסלים', input(b, 'height', 'number', { min: 4, max: 200 })))];
       case 'social':
       case 'menu': return [field('קישורים, שורה לכל קישור: טקסט | כתובת', linksField(b)), h('div', { class: 'fields' }, field('יישור', select(b, 'align', ALIGNS.slice(0, 3))))];
@@ -324,7 +376,10 @@ export async function mountBuilder(container, design, opts) {
     }
   }
 
+  const spaceField = (b, key, label) => h('label', { class: 'gapf', title: 'מרווח ריק בפיקסלים. 0 = בלי מרווח נוסף' }, label,
+    h('input', { type: 'number', min: 0, max: 200, step: 4, value: b[key] || 0, oninput: (e) => { const v = Math.max(0, Math.min(200, Number(e.target.value) || 0)); if (v) b[key] = v; else delete b[key]; changed(); } }));
   const visibility = (b) => h('div', { class: 'row vis' },
+    spaceField(b, 'spaceTop', 'מרווח מעל'), spaceField(b, 'spaceBottom', 'מרווח מתחת'),
     check(b, 'hideMobile', 'להסתיר בנייד', () => { if (b.hideMobile) b.hideDesktop = false; drawBlocks(); }),
     check(b, 'hideDesktop', 'להסתיר במחשב', () => { if (b.hideDesktop) b.hideMobile = false; drawBlocks(); }),
     allLists.length ? h('select', { class: 'cond', title: 'תנאי תצוגה לפי נמען', onchange: (e) => {
