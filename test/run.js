@@ -994,6 +994,20 @@ try {
   }
   step('מרווח מעל ומתחת לכל בלוק, עובי קו מפריד, ופסקאות עם יישור ורווח משלהן');
 
+  // --- גרסה 0.9.3: כלי תמונה בשני טורים ---
+  {
+    const d = defaultDesign();
+    d.blocks = [{ type: 'columns', ratio: 60, valign: 'middle', cols: [{ src: '', alt: '', html: '<p>טקסט</p>' }, { src: 'https://x.test/a.png', alt: 'ספר', html: '<p>מתחת</p>', widthPct: 50, imgAlign: 'left', imgBelow: '1', href: 'https://x.test/book' }] },
+      { type: 'columns', cols: [{ src: 'https://x.test/b.png', alt: '', html: '<p>א</p>' }, { src: '', alt: '', html: '<p>ב</p>' }] }];
+    const out = renderDesign(d, {});
+    assert.ok(out.includes('width="60%" valign="middle"') && out.includes('width="40%" valign="middle"'), 'חלוקת רוחב ויישור לגובה');
+    const colW = Math.floor((600 - 36) * 0.4) - 12; const px = Math.round(colW * 0.5);
+    assert.ok(out.includes(`align="left" width="${px}" style="width:50%;max-width:${px}px;"`) && out.includes('<a href="https://x.test/book"'), 'תמונה מוקטנת, מיושרת לשמאל ועם קישור');
+    assert.ok(out.indexOf('<p style="margin:0 0 1em 0;">מתחת</p>') < out.indexOf('https://x.test/a.png'), 'התמונה מתחת לטקסט');
+    assert.ok(out.includes('width="50%" valign="top"') && out.indexOf('https://x.test/b.png') < out.indexOf('>א</p>'), 'ברירת המחדל נשארת: חצי-חצי, תמונה מעל הטקסט');
+  }
+  step('שני טורים: גודל התמונה, מיקומה, קישור, חלוקת רוחב ויישור לגובה');
+
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
   smtp.close();
