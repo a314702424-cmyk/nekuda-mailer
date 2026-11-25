@@ -147,11 +147,25 @@ function renderBlock(b, s) {
       return `<tr><td class="pad" align="${al}" style="${pad}"><table role="presentation" cellpadding="0" cellspacing="0" border="0" align="${al}"${full}${b.full ? ' style="width:100%;"' : ''}><tr><td bgcolor="${bg}" align="center" style="background:${bg};border-radius:${r}px;text-align:center;"><a href="${esc(b.href)}" target="_blank" style="display:block;padding:${padY}px ${padX}px;font-family:${s.font};font-size:${fs}px;font-weight:bold;color:${fg};text-decoration:none;border-radius:${r}px;">${esc(b.text)}</a></td></tr></table></td></tr>`;
     }
     case 'columns': {
-      const colW = Math.floor((s.width - 48) / 2) - 12;
+      // חלוקת הרוחב בין הטורים: אחוז הרוחב של הטור הימני (הראשון)
+      const first = [30, 35, 40, 50, 60, 65, 70].includes(Number(b.ratio)) ? Number(b.ratio) : 50;
+      const va = ['top', 'middle', 'bottom'].includes(b.valign) ? b.valign : 'top';
       const cells = (b.cols || []).slice(0, 2).map((c, i) => {
-        const img = c.src ? `<div style="margin:0 0 10px 0;">${imgTag(c.src, c.alt, colW, 100)}</div>` : '';
+        const share = i === 0 ? first : 100 - first;
+        const colW = Math.floor((s.width - 36) * share / 100) - 12;
+        let img = '';
+        if (c.src) {
+          const pct = num(c.widthPct, 100, 10, 100);
+          const px = Math.round(colW * pct / 100);
+          const al = alignOf(c.imgAlign, 'center') === 'justify' ? 'center' : alignOf(c.imgAlign, 'center');
+          let tag = imgTag(c.src, c.alt, px, 100);
+          if (c.href && c.href !== 'https://') tag = `<a href="${esc(c.href)}" target="_blank" style="text-decoration:none;">${tag}</a>`;
+          const gapCss = c.imgBelow ? 'margin:10px 0 0 0;' : 'margin:0 0 10px 0;';
+          img = `<div align="${al}" style="${gapCss}text-align:${al};"><table role="presentation" cellpadding="0" cellspacing="0" border="0" align="${al}" width="${px}" style="width:${pct}%;max-width:${px}px;"><tr><td>${tag}</td></tr></table></div>`;
+        }
         const cls = b.reverseMobile ? (i === 0 ? 'colA' : 'colB') : 'col';
-        return `<td class="${cls} txt" width="50%" valign="top" style="width:50%;padding:0 6px 12px 6px;${base}font-size:${s.fontSize}px;line-height:1.6;text-align:right;">${img}${inlineRich(c.html, s)}</td>`;
+        const text = inlineRich(c.html, s);
+        return `<td class="${cls} txt" width="${share}%" valign="${va}" style="width:${share}%;vertical-align:${va};padding:0 6px 12px 6px;${base}font-size:${s.fontSize}px;line-height:1.6;text-align:right;">${c.imgBelow ? text + img : img + text}</td>`;
       }).join('');
       return `<tr><td class="pad" style="padding:14px 18px;"><table role="presentation" class="${b.reverseMobile ? 'revt' : ''}" width="100%" cellpadding="0" cellspacing="0" border="0" dir="${s.dir}"><tr>${cells}</tr></table></td></tr>`;
     }
