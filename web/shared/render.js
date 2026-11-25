@@ -102,7 +102,11 @@ const alignOf = (v, d = 'right') => (['right', 'center', 'left', 'justify'].incl
 
 function inlineRich(htmlStr, s, extraP = '') {
   return String(htmlStr || '')
-    .replace(/<p(\s[^>]*)?>/gi, (m, a = '') => (/style\s*=/i.test(a) ? m : `<p${a} style="margin:0 0 1em 0;${extraP}">`))
+    // פסקה בלי עיצוב מקבלת מרווח קבוע. פסקה שעוצבה בעורך (יישור, רווח שורות) שומרת על העיצוב שלה, ומקבלת מרווח רק אם לא נקבע לה אחד
+    .replace(/<p(\s[^>]*)?>/gi, (m, a = '') => {
+      if (!/style\s*=/i.test(a)) return `<p${a} style="margin:0 0 1em 0;${extraP}">`;
+      return /margin/i.test(a) ? m : `<p${a.replace(/style\s*=\s*"/i, 'style="margin:0 0 1em 0;')}>`;
+    })
     .replace(/<a(\s[^>]*)?>/gi, (m, a = '') => (/style\s*=/i.test(a) ? m : `<a${a} style="color:${s.link};text-decoration:underline;">`))
     .replace(/<img(\s[^>]*)?>/gi, (m, a = '') => (/style\s*=/i.test(a) ? m : `<img${a} style="max-width:100%;height:auto;border:0;">`));
 }
@@ -152,7 +156,7 @@ function renderBlock(b, s) {
       return `<tr><td class="pad" style="padding:14px 18px;"><table role="presentation" class="${b.reverseMobile ? 'revt' : ''}" width="100%" cellpadding="0" cellspacing="0" border="0" dir="${s.dir}"><tr>${cells}</tr></table></td></tr>`;
     }
     case 'divider':
-      return `<tr><td class="pad" style="padding:8px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="border-top:1px solid ${color(b.color, '#d9dce3')};font-size:0;line-height:0;">&nbsp;</td></tr></table></td></tr>`;
+      return `<tr><td class="pad" style="padding:8px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="border-top:${num(b.thick, 1, 1, 12)}px solid ${color(b.color, '#d9dce3')};font-size:0;line-height:0;">&nbsp;</td></tr></table></td></tr>`;
     case 'spacer': {
       const hgt = num(b.height, 24, 4, 200);
       return `<tr><td style="height:${hgt}px;font-size:0;line-height:${hgt}px;">&nbsp;</td></tr>`;
@@ -193,17 +197,19 @@ function renderBlock(b, s) {
   }
 }
 
-function renderOne(b, s, synced, depth = 0) {
+function renderOne(b, s, synced, depth = 0, mark = '') {
   if (!b) return '';
-  if (b.type === 'synced') return depth > 2 ? '' : renderOne(synced && synced[b.ref], s, synced, depth + 1);
+  if (b.type === 'synced') return depth > 2 ? '' : renderOne(synced && synced[b.ref], s, synced, depth + 1, mark);
   let row = renderBlock(b, s);
   if (!row) return '';
   const blockBg = color(b.blockBg, '');
   if (blockBg && ['heading', 'text', 'image', 'button', 'columns', 'menu', 'social', 'video', 'footer'].includes(b.type)) {
     row = row.replace(/^<tr><td([^>]*?)style="/, `<tr><td$1bgcolor="${blockBg}" style="background:${blockBg};`);
   }
-  if (b.hideMobile) row = row.replace(/^<tr/, '<tr class="hm"');
-  else if (b.hideDesktop) row = row.replace(/^<tr/, '<tr class="hd" style="display:none;mso-hide:all;"');
+  // מרווח מעל ומתחת לבלוק: שורת טבלה ריקה בגובה קבוע, שמוצגת באותה צורה בכל תוכנות הדואר
+  const gap = (px) => (px ? `<tr><td${blockBg ? ` bgcolor="${blockBg}"` : ''} style="height:${px}px;font-size:0;line-height:${px}px;${blockBg ? `background:${blockBg};` : ''}">&nbsp;</td></tr>` : '');
+  const attr = (b.hideMobile ? ' class="hm"' : b.hideDesktop ? ' class="hd" style="display:none;mso-hide:all;"' : '') + mark;
+  row = [gap(num(b.spaceTop, 0, 0, 200)), row, gap(num(b.spaceBottom, 0, 0, 200))].filter(Boolean).map((r) => (attr ? r.replace(/^<tr/, '<tr' + attr) : r)).join('\n');
   // תנאי תצוגה: הבלוק נשלח רק לחברי רשימה מסוימת, או רק למי שאינו חבר בה. השרת מסנן לפי הנמען
   const onlyList = Number(b.onlyList) || 0;
   if (onlyList > 0) row = `<!--nm-if:${b.notInList ? '!' : ''}L${onlyList}-->${row}<!--nm-end-->`;
@@ -223,7 +229,7 @@ export function renderDesign(design, { subject = '', preheader = '', synced = nu
   s.font = fontOk(s.font, FONTS[0][0]);
   s.headingFont = s.headingFont ? fontOk(s.headingFont, '') : '';
   // במצב עריכה כל בלוק מסומן במספרו, כדי שלחיצה עליו בתצוגה המקדימה תפתח אותו לעריכה
-  const rows = (d.blocks || []).map((b, i) => { const r = renderOne(b, s, synced); return editor && r ? r.replace(/<tr/, `<tr data-b="${i}"`) : r; }).join('\n');
+  const rows = (d.blocks || []).map((b, i) => renderOne(b, s, synced, 0, editor ? ` data-b="${i}"` : '')).join('\n');
   // הריפוד אחרי התקציר מונע מתוכנת הדואר למשוך טקסט מגוף המייל לשורת התצוגה המקדימה
   const pre = preheader
     ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;font-size:1px;line-height:1px;color:${s.bg};">${esc(preheader)}${'&#847;&zwnj;&nbsp;'.repeat(70)}</div>` : '';
