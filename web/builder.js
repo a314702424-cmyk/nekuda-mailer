@@ -355,7 +355,17 @@ export async function mountBuilder(container, design, opts) {
         field('צבע רקע', input(b, 'bg', 'color', { value: b.bg || design.settings.btnBg })), field('צבע טקסט', input(b, 'color', 'color', { value: b.color || design.settings.btnColor })),
         field('עיגול פינות', input(b, 'radius', 'number', { min: 0, max: 40, value: b.radius ?? design.settings.btnRadius })), field('יישור', select(b, 'align', ALIGNS.slice(0, 3))),
         field('גודל', select(b, 'size', [['', 'רגיל'], ['s', 'קטן'], ['l', 'גדול']]))), check(b, 'full', 'כפתור לכל רוחב הגליון')];
-      case 'columns': return [...b.cols.map((c, i) => h('div', { style: 'margin-bottom:10px' }, h('label', {}, i === 0 ? 'טור ימני' : 'טור שמאלי'), imageField(c), field('טקסט חלופי לתמונה', input(c, 'alt')), richText(c))),
+      case 'columns': return [
+        h('div', { class: 'fields' },
+          field('חלוקת הרוחב (ימין / שמאל)', select(b, 'ratio', [[50, 'שווה: 50 / 50'], [30, '30 / 70'], [35, '35 / 65'], [40, '40 / 60'], [60, '60 / 40'], [65, '65 / 35'], [70, '70 / 30']])),
+          field('יישור לגובה בין הטורים', select(b, 'valign', [['top', 'למעלה'], ['middle', 'לאמצע'], ['bottom', 'למטה']]))),
+        ...b.cols.map((c, i) => h('div', { class: 'colbox' }, h('label', { class: 'colttl' }, i === 0 ? 'טור ימני' : 'טור שמאלי'), imageField(c),
+          h('div', { class: 'fields' },
+            field('רוחב התמונה באחוזים מהטור', input(c, 'widthPct', 'number', { min: 10, max: 100, step: 5, value: c.widthPct || 100 })),
+            field('מיקום התמונה לרוחב', select(c, 'imgAlign', [['center', 'מרכז'], ['right', 'ימין'], ['left', 'שמאל']])),
+            field('מיקום התמונה לגובה', select(c, 'imgBelow', [['', 'מעל הטקסט'], ['1', 'מתחת לטקסט']])),
+            field('טקסט חלופי לתמונה', input(c, 'alt')), field('קישור בלחיצה על התמונה', input(c, 'href', 'url', { class: 'ltr' }))),
+          richText(c))),
         check(b, 'reverseMobile', 'בנייד: להציג את הטור השמאלי ראשון')];
       case 'divider': return [h('div', { class: 'fields' }, field('צבע הקו', input(b, 'color', 'color')), field('עובי הקו', input(b, 'thick', 'number', { min: 1, max: 12, value: b.thick || 1 }))),
         h('p', { class: 'muted small-note' }, 'כדי להרחיק את הקו ממה שמעליו או מתחתיו, משנים את "מרווח מעל" ו"מרווח מתחת" בשורה שלמטה.')];
