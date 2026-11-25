@@ -977,6 +977,23 @@ try {
   }
   step('שליחת בדיקה: כתובות קבועות לעורכים, כתובת חופשית רק למורשי שליחה');
 
+  // --- גרסה 0.9.2: מרווחים ועיצוב פסקה ---
+  {
+    const d = defaultDesign();
+    d.blocks = [{ type: 'divider', color: '#112233', thick: 3, spaceTop: 40 },
+      { type: 'text', html: '<p>רגיל</p><p style="text-align: justify;">מיושר</p><p style="margin-top: 24px; margin-bottom: 6px; line-height: 2;">מרווח</p>', spaceTop: 12, spaceBottom: 28, blockBg: '#fff0f0', hideMobile: true },
+      { type: 'text', html: '<p>בלי מרווח</p>', spaceTop: 999, spaceBottom: -5 }];
+    const out = renderDesign(d, {});
+    assert.ok(out.includes('<tr><td style="height:40px;font-size:0;line-height:40px;">&nbsp;</td></tr>\n<tr><td class="pad" style="padding:8px 24px;">') && out.includes('border-top:3px solid #112233'), 'מרווח מעל הקו המפריד ועובי הקו');
+    assert.ok(out.includes('<tr class="hm"><td bgcolor="#fff0f0" style="height:12px;font-size:0;line-height:12px;background:#fff0f0;">') && out.includes('<tr class="hm"><td bgcolor="#fff0f0" style="height:28px;'), 'המרווחים מקבלים את רקע הבלוק ואת ההסתרה בנייד');
+    assert.ok(out.includes('<p style="margin:0 0 1em 0;">רגיל</p>') && out.includes('<p style="margin:0 0 1em 0;text-align: justify;">מיושר</p>') && out.includes('<p style="margin-top: 24px; margin-bottom: 6px; line-height: 2;">מרווח</p>'), 'פסקה מעוצבת שומרת על העיצוב שלה');
+    assert.ok(out.includes('height:200px') && !out.includes('height:-5px') && !out.includes('height:999px'), 'מרווח מוגבל לטווח סביר');
+    const ed = renderDesign(d, { editor: true });
+    assert.equal((ed.match(/<tr class="hm" data-b="1"/g) || []).length, 3, 'בתצוגת העריכה גם שורות המרווח שייכות לבלוק');
+    assert.ok(ed.includes('<tr data-b="0"><td style="height:40px') && ed.includes('<tr data-b="0"><td class="pad"'));
+  }
+  step('מרווח מעל ומתחת לכל בלוק, עובי קו מפריד, ופסקאות עם יישור ורווח משלהן');
+
   console.log(`\nכל ${passed} קבוצות הבדיקה עברו.`);
 } finally {
   smtp.close();
